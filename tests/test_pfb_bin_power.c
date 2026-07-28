@@ -1,5 +1,5 @@
 /*
- * meshtastic-sniffer: PFB per-bin absolute power probe.
+ * meshcore-sniffer: PFB per-bin absolute power probe.
  *
  * Reads a wideband cs8 IQ capture, fans it out through the same
  * channelizer the live pipeline uses (no LoRa decoder), accumulates

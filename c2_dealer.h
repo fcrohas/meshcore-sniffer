@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: outbound DEALER C2 socket.
+ * meshcore-sniffer: outbound DEALER C2 socket.
  *
  * When --c2-dealer=tcp://host:port is set, opens a ZMQ DEALER socket
  * that connects outbound to a meshtastic-fusion ROUTER. NAT-friendly

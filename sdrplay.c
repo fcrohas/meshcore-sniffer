@@ -29,6 +29,9 @@ extern pid_t self_pid;
 extern double samp_rate;
 extern double center_freq;
 extern int sdrplay_gain_val;
+extern int sdrplay_lna_state;
+extern int sdrplay_agc_mode;
+extern int sdrplay_agc_setpoint_dbfs;
 extern int bias_tee;
 extern int verbose;
 
@@ -315,18 +318,28 @@ void *sdrplay_setup(const char *serial)
     chp->ctrlParams.dcOffset.DCenable = 1;
     chp->ctrlParams.dcOffset.IQenable = 1;
 
-    if (sdrplay_gain_val >= 0) {
-        int grdb = sdrplay_gain_val;
+    /* AGC on/off: explicit --sdrplay-agc/--sdrplay-agc-off wins; otherwise
+     * fall back to the sign of --gain (legacy behavior -- --gain defaults
+     * to 40, so manual mode is the out-of-the-box default). LNAstate is a
+     * separate front-end gain stage that AGC never touches (AGC only
+     * servos gRdB), so --sdrplay-lna applies in both modes. */
+    int want_agc = sdrplay_agc_mode >= 0 ? (sdrplay_agc_mode == 1)
+                                          : (sdrplay_gain_val < 0);
+    unsigned char lna = sdrplay_lna_state >= 0 ? (unsigned char)sdrplay_lna_state : 0;
+    chp->tunerParams.gain.LNAstate = lna;
+
+    if (!want_agc) {
+        int grdb = sdrplay_gain_val >= 0 ? sdrplay_gain_val : 40;
         if (grdb < 20) grdb = 20;
         if (grdb > 59) grdb = 59;
         chp->tunerParams.gain.gRdB = grdb;
-        chp->tunerParams.gain.LNAstate = 0;
         chp->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
-        fprintf(stderr, "sdrplay: AGC disabled, manual gRdB=%d LNA=0\n", grdb);
+        fprintf(stderr, "sdrplay: AGC disabled, manual gRdB=%d LNA=%u\n", grdb, lna);
     } else {
         chp->ctrlParams.agc.enable = sdrplay_api_AGC_5HZ;
-        chp->ctrlParams.agc.setPoint_dBfs = -30;
-        fprintf(stderr, "sdrplay: AGC enabled (5 Hz)\n");
+        chp->ctrlParams.agc.setPoint_dBfs = sdrplay_agc_setpoint_dbfs;
+        fprintf(stderr, "sdrplay: AGC enabled (5 Hz, setpoint=%d dBFS), LNA=%u\n",
+                sdrplay_agc_setpoint_dbfs, lna);
     }
 
     /* Bias tee -- per-model configuration */
@@ -339,7 +352,7 @@ void *sdrplay_setup(const char *serial)
             chp->rsp1aTunerParams.biasTEnable = 1;
             break;
         case SDRPLAY_RSP2_ID:
-            chp->rsp2TunerParams.antennaSel = sdrplay_api_Rsp2_ANTENNA_B;
+            chp->rsp2TunerParams.antennaSel = sdrplay_api_Rsp2_ANTENNA_A;
             chp->rsp2TunerParams.biasTEnable = 1;
             break;
         case SDRPLAY_RSPduo_ID:
@@ -394,10 +407,10 @@ void *sdrplay_setup(const char *serial)
 #endif
     default:                 model = "Unknown";  break;
     }
-    fprintf(stderr, "sdrplay: %s serial=%s sr=%.0f freq=%.0f bw=%d %s\n",
+    fprintf(stderr, "sdrplay: %s serial=%s sr=%.0f freq=%.0f bw=%d %s LNA=%u\n",
             model, ctx->device.SerNo, samp_rate, center_freq,
             (int)chp->tunerParams.bwType,
-            sdrplay_gain_val >= 0 ? "gain=manual" : "gain=AGC");
+            want_agc ? "gain=AGC" : "gain=manual", lna);
 
     return ctx;
 }

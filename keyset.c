@@ -7,7 +7,7 @@
  * https://github.com/meshtastic/firmware (GPL-3.0-or-later). The
  * read-write keyset, bucket dispatcher and parsers are original.
  *
- * meshtastic-sniffer: multi-key dispatch.
+ * meshcore-sniffer: multi-key dispatch.
  */
 
 #include "keyset.h"

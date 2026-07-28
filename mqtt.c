@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: MQTT publisher.
+ * meshcore-sniffer: MQTT publisher.
  *
  * Connects to a broker (libmosquitto) and publishes one JSON line per
  * decoded packet. Topic defaults to meshtastic/<station-id>; user can

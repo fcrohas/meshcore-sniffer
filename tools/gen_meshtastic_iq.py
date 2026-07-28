@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate a clean Meshtastic-shaped LoRa IQ capture for validating
-meshtastic-sniffer's demod against a known-good reference.
+meshcore-sniffer's demod against a known-good reference.
 
 Pipeline:
   1. Build the inner Data envelope protobuf (port=TEXT_MESSAGE_APP, payload="Hello").
@@ -13,7 +13,7 @@ Pipeline:
       -> modulate).
   5. Tail-pad with silence and write to a .cf32 file.
 
-The output file is suitable for `meshtastic-sniffer --file=PATH --rate=BW
+The output file is suitable for `meshcore-sniffer --file=PATH --rate=BW
 --center=...`. With the LoRa demod fully working we should see the message
 "Hello" on TEXT_MESSAGE_APP in the JSON feed.
 
@@ -183,7 +183,7 @@ def main():
     tb.wait()
     sz = os.path.getsize(args.out)
     print(f"wrote {sz} bytes ({sz//8} complex samples) to {args.out}")
-    print(f"replay with: ./meshtastic-sniffer --file={args.out} "
+    print(f"replay with: ./meshcore-sniffer --file={args.out} "
           f"--rate={samp_rate} --center=903000000 --presets=LongFast --keys=default")
 
 

@@ -1,8 +1,8 @@
-# ThreadSanitizer suppressions for meshtastic-sniffer.
+# ThreadSanitizer suppressions for meshcore-sniffer.
 #
 # Use with: TSAN_OPTIONS=suppressions=tsan.suppressions:halt_on_error=0
 # Build with: cmake -DMESH_SAN=thread -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF ..
-# Run with:   setarch $(uname -m) -R ./meshtastic-sniffer ...
+# Run with:   setarch $(uname -m) -R ./meshcore-sniffer ...
 #             (the -R drops ASLR; libtsan + modern kernels otherwise
 #              die with "unexpected memory mapping" at startup.)
 #

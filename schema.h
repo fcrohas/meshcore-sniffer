@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: JSON Schema for the event format. See schema.c.
+ * meshcore-sniffer: JSON Schema for the event format. See schema.c.
  */
 
 #ifndef SCHEMA_H

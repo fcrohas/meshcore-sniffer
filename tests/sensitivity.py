@@ -4,7 +4,7 @@
 For each (preset, snr_db, cfo_hz) cell:
   1. Synthesize N Meshtastic-shaped frames at the target SNR/CFO
      using gr-lora_sdr's lora_tx hier-block (sync_word=0x2b).
-  2. Run meshtastic-sniffer on the resulting .cs8 -- count CRC-pass frames.
+  2. Run meshcore-sniffer on the resulting .cs8 -- count CRC-pass frames.
   3. Run gr-lora_sdr on the same file -- count CRC-ok lines.
   4. Emit a CSV row with both counts.
 
@@ -37,7 +37,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SYNTH = REPO / "tests" / "sensitivity_synth.py"
-SNIFFER = REPO / "build" / "meshtastic-sniffer"
+SNIFFER = REPO / "build" / "meshcore-sniffer"
 GR_LORA = REPO / "tools" / "gr_lora_usrp_rx.py"
 # dxlaprs `lorarx` -- third reference receiver. Built externally from
 # http://oe5dxl.hamspirit.at:8025/aprs/c/ (GPL-2.0+); we do not vendor it.

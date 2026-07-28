@@ -6,7 +6,7 @@
  * tables, port-number assignments, region/band edges) come from the upstream
  * Meshtastic firmware at https://github.com/meshtastic/firmware (GPL-3.0-or-later).
  *
- * meshtastic-sniffer: protocol constant tables + tiny helpers.
+ * meshcore-sniffer: protocol constant tables + tiny helpers.
  */
 
 #include "meshtastic.h"

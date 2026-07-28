@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: geofence alerts.
+ * meshcore-sniffer: geofence alerts.
  *
  * INI-style polygon loader + point-in-polygon test (ray casting). On
  * every POSITION decode, fires GEOFENCE_ENTRY / GEOFENCE_EXIT events

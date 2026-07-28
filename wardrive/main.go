@@ -30,7 +30,7 @@ func main() {
 	selfTest := flag.Bool("self-test", false,
 		"Synthesize a deterministic 3-minute drive and export to --out-dir.")
 	capture := flag.Bool("capture", false,
-		"Live capture: spawn meshtastic-sniffer, subscribe to ZMQ, write to --db.")
+		"Live capture: spawn meshcore-sniffer, subscribe to ZMQ, write to --db.")
 	exportFromDB := flag.Bool("export-from-db", false,
 		"Read --db and write CSV / KML / JSON to --out-dir. Re-runnable.")
 
@@ -47,7 +47,7 @@ func main() {
 	gpsdEndpoint := flag.String("gpsd", "localhost:2947",
 		"gpsd TCP endpoint (host[:port]).")
 	snifferPath := flag.String("sniffer", "",
-		"Path to meshtastic-sniffer binary. Empty = autodiscover. Env WARDRIVE_SNIFFER also accepted.")
+		"Path to meshcore-sniffer binary. Empty = autodiscover. Env WARDRIVE_SNIFFER also accepted.")
 	zmqEndpoint := flag.String("zmq", "tcp://127.0.0.1:7008",
 		"ZMQ endpoint used by the sniffer subprocess (and the wardrive subscriber).")
 	notes := flag.String("notes", "",
@@ -59,7 +59,7 @@ func main() {
 				"  %s --self-test [--out-dir=DIR]\n"+
 				"  %s --capture --db=DB [--gpsd=H:P] [--sniffer=PATH] [--station-id=ID] [sniffer flags...]\n"+
 				"  %s --export-from-db --db=DB [--out-dir=DIR] [--export-session=N]\n\n"+
-				"  Capture mode forwards any unknown flags to the meshtastic-sniffer subprocess.\n"+
+				"  Capture mode forwards any unknown flags to the meshcore-sniffer subprocess.\n"+
 				"  Self-test mode requires no radio, no GPS, no DB.\n"+
 				"  Export-from-db mode is offline; safe to run while a capture is active.\n\n",
 			os.Args[0], os.Args[0], os.Args[0])

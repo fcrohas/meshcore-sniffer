@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: PSK dictionary attack.
+ * meshcore-sniffer: PSK dictionary attack.
  *
  * Background thread tries each wordlist entry as a candidate PSK
  * against undecrypted frames. To reuse the existing decode validation

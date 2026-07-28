@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 CEMAXECUTER LLC
 //
-// wardrive/zmq_sub.go: subscribe to meshtastic-sniffer's ZMQ PUB
+// wardrive/zmq_sub.go: subscribe to meshcore-sniffer's ZMQ PUB
 // feed and convert per-frame JSON events to Observation structs.
 //
 // The sniffer emits one event per frame on the JSON firehose. Some

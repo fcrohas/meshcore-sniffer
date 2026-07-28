@@ -25,7 +25,7 @@ if [ ! -r "$IQ" ]; then
 fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$REPO/build/meshtastic-sniffer"
+BIN="$REPO/build/meshcore-sniffer"
 
 if [ ! -x "$BIN" ]; then
     echo "build the sniffer first: $BIN not found" >&2

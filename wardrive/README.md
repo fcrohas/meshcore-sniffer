@@ -4,7 +4,7 @@
 > (live capture pipeline) are functional and tested end-to-end via
 > `--self-test`. No real-world drive has been recorded yet.
 
-Mobile single-node passive wardriving for [meshtastic-sniffer](../README.md).
+Mobile single-node passive wardriving for [meshcore-sniffer](../README.md).
 Strap an SDR + GPS to a vehicle, drive around, build a Kismet-style
 local SQLite of every Meshtastic node observed, estimate per-node
 locations with an RSSI²-weighted centroid (plus 1-sigma uncertainty),
@@ -16,7 +16,7 @@ while the wardrive layer handles GPS, SQLite, and exports.
 
 ## What it does
 
-- **Owns the radio via subprocess.** Launches `meshtastic-sniffer`
+- **Owns the radio via subprocess.** Launches `meshcore-sniffer`
   as a child with `--zmq=tcp://127.0.0.1:7008` and subscribes to its
   ZMQ PUB feed. Any sniffer flag the operator passes on the wardrive
   command line is forwarded verbatim, so `--hackrf`, `--region=US`,
@@ -109,7 +109,7 @@ Storage:
 Capture:
   --station-id=ID           rig label for the sessions table + exports
   --gpsd=HOST[:PORT]        gpsd endpoint (default localhost:2947)
-  --sniffer=PATH            meshtastic-sniffer binary; empty = autodiscover
+  --sniffer=PATH            meshcore-sniffer binary; empty = autodiscover
   --zmq=tcp://H:P           ZMQ endpoint used by sniffer + subscriber
   --notes=TEXT              free-text annotation saved on the session row
 
@@ -130,7 +130,7 @@ Capture:
                               │
                               │ Current()
                               ▼
-   meshtastic-sniffer  ──→  ZMQ PUB  ──→  ZMQSubscriber  ──→  Observations
+   meshcore-sniffer  ──→  ZMQ PUB  ──→  ZMQSubscriber  ──→  Observations
         (child)        tcp://...:7008  parses JSON, tags
                                        with GPS at receive
                                                 │
@@ -202,7 +202,7 @@ data can mail/attach the CSV manually.
 | `jsonout.go` | structured JSON sidecar |
 | `db.go` | SQLite schema + prepared inserts + load functions |
 | `gpsd.go` | TCP/JSON client for gpsd, parses TPV reports |
-| `sniffer_proc.go` | spawn and manage the meshtastic-sniffer child |
+| `sniffer_proc.go` | spawn and manage the meshcore-sniffer child |
 | `zmq_sub.go` | subscribe to the sniffer feed, convert JSON to Observations |
 | `capture.go` | orchestrate gpsd + sniffer + ZMQ + DB |
 | `export.go` | re-runnable export from DB |

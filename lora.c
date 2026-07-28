@@ -10,7 +10,7 @@
  * demodulation, frame state machine, FFT / CFO handling and integration
  * with the polyphase channelizer are original to this project.
  *
- * meshtastic-sniffer: LoRa CSS demodulator.
+ * meshcore-sniffer: LoRa CSS demodulator.
  *
  * Stage-by-stage implementation. The DSP path is:
  *   accumulate N=2^SF samples per symbol
@@ -80,6 +80,7 @@ typedef struct {
     atomic_uint_fast64_t payload_crc_present [LORA_STATS_SF_COUNT];
     atomic_uint_fast64_t payload_crc_pass    [LORA_STATS_SF_COUNT];
     atomic_uint_fast64_t payload_crc_fail    [LORA_STATS_SF_COUNT];
+    atomic_uint_fast64_t payload_crc_corrected[LORA_STATS_SF_COUNT];
     atomic_uint_fast64_t payload_no_crc      [LORA_STATS_SF_COUNT];
     atomic_uint_fast64_t published_frames    [LORA_STATS_SF_COUNT];
     atomic_uint_fast64_t snr_hist_preamble [LORA_STATS_SNR_BUCKETS];
@@ -200,6 +201,7 @@ void lora_demod_stats_dump(FILE *fp)
     ROW("payload_crc_present",  payload_crc_present);
     ROW("payload_crc_pass",     payload_crc_pass);
     ROW("payload_crc_fail",     payload_crc_fail);
+    ROW("payload_crc_corrected",payload_crc_corrected);
     ROW("payload_no_crc",       payload_no_crc);
     ROW("published_frames",     published_frames);
 #undef ROW
@@ -334,6 +336,35 @@ uint16_t lora_crc16(const uint8_t *data, size_t len)
             crc = (uint16_t)((crc & 0x8000) ? (crc << 1) ^ 0x1021 : (crc << 1));
     }
     return crc;
+}
+
+bool lora_crc_bruteforce_correct(uint8_t *bytes, size_t byte_count)
+{
+    if (!bytes || byte_count < 4) return false;   /* need payload(>=2) + CRC(2) */
+
+    size_t pay_len = byte_count - 2;
+    uint16_t got_crc = (uint16_t)(bytes[byte_count - 2] |
+                                  ((uint16_t)bytes[byte_count - 1] << 8));
+
+    for (size_t bit = 0; bit < pay_len * 8; ++bit) {
+        size_t byte_idx = bit >> 3;
+        uint8_t mask = (uint8_t)(1u << (bit & 7));
+
+        bytes[byte_idx] ^= mask;
+
+        /* Same LoRa CRC convention as the inline check in state_tick():
+         * CRC16/CCITT over payload[0..pay_len-3], XOR'd with the last
+         * two payload bytes (which may themselves be the ones just
+         * flipped). */
+        uint16_t want_crc = lora_crc16(bytes, pay_len - 2);
+        want_crc ^= bytes[pay_len - 1];
+        want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
+
+        if (got_crc == want_crc) return true;   /* keep this flip */
+
+        bytes[byte_idx] ^= mask;   /* not it -- restore and try next bit */
+    }
+    return false;
 }
 
 /* ---- Diagonal deinterleave --------------------------------------------
@@ -497,6 +528,13 @@ struct lora_decoder {
     float        header_llrs[8][LLR_PER_SYMBOL];
     float        payload_llrs[MAX_PAYLOAD_SYMBOLS][LLR_PER_SYMBOL];
 
+    /* Single-bit CRC brute-force recovery toggle, per decoder instance
+     * (not a global option flag -- lora.c is linked standalone by
+     * several diagnostic test executables that don't link options.c).
+     * Defaults on in lora_decoder_create_os(); callers that want it off
+     * (e.g. --no-crc-bruteforce) call lora_decoder_set_crc_bruteforce(). */
+    bool         crc_bruteforce;
+
     /* SFO/STO sub-bin tracking, gr-lora_sdr frame_sync_impl.cc port.
      * Set via lora_decoder_set_center_freq(); when 0 the SFO compensation
      * paths are inert and the decoder behaves as before. */
@@ -615,6 +653,7 @@ lora_decoder_t *lora_decoder_create_os(int sf, int cr, int bw_hz, int os_factor)
     d->N  = 1 << sf;
     d->os_factor = os_factor;
     d->samples_per_symbol = d->N * os_factor;
+    d->crc_bruteforce = true;
 
     d->downchirp = fftwf_alloc_complex(d->N);
     d->upchirp   = fftwf_alloc_complex(d->N);
@@ -693,6 +732,12 @@ void lora_decoder_set_center_freq(lora_decoder_t *d, double center_freq_hz)
             fftw_planner_unlock();
         }
     }
+}
+
+void lora_decoder_set_crc_bruteforce(lora_decoder_t *d, bool enable)
+{
+    if (!d) return;
+    d->crc_bruteforce = enable;
 }
 
 void lora_decoder_destroy(lora_decoder_t *d)
@@ -1906,11 +1951,27 @@ static void state_tick(lora_decoder_t *d)
                 want_crc ^= bytes[pay_len - 1];
                 want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
                 d->meta.payload_crc_ok = (got_crc == want_crc);
+                d->meta.crc_corrected  = false;
+                if (!d->meta.payload_crc_ok && d->crc_bruteforce &&
+                    lora_crc_bruteforce_correct(bytes, (size_t)byte_count)) {
+                    /* bytes[] now holds the corrected payload -- re-derive
+                     * got_crc/want_crc for the trace dump below, which
+                     * otherwise would still show the pre-correction
+                     * mismatch even though publish now proceeds. */
+                    got_crc = (uint16_t)(bytes[byte_count-2] |
+                                        ((uint16_t)bytes[byte_count-1] << 8));
+                    want_crc = lora_crc16(bytes, pay_len - 2);
+                    want_crc ^= bytes[pay_len - 1];
+                    want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
+                    d->meta.payload_crc_ok = true;
+                    d->meta.crc_corrected  = true;
+                }
                 STATS_BUMP(payload_crc_present, d->sf);
                 {
                     int _lb = stats_paylen_bucket(d->payload_len);
                     if (d->meta.payload_crc_ok) {
                         STATS_BUMP(payload_crc_pass, d->sf);
+                        if (d->meta.crc_corrected) STATS_BUMP(payload_crc_corrected, d->sf);
                         atomic_fetch_add_explicit(
                             &g_demod_stats.crc_pass_by_len[_lb], 1,
                             memory_order_relaxed);

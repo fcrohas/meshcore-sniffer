@@ -1,5 +1,5 @@
 #!/bin/bash
-# meshtastic-sniffer smoke test.
+# meshcore-sniffer smoke test.
 #
 # Runs the binary's --selftest, then spawns it against a synthetic IQ
 # noise file and exercises every /api/* endpoint via curl.  Returns 0
@@ -11,16 +11,16 @@
 set -e
 PORT=${PORT:-8911}
 
-# Find the binary: explicit $BIN env var, then ./meshtastic-sniffer (project
-# root after a make install-style copy), then build/meshtastic-sniffer (the
+# Find the binary: explicit $BIN env var, then ./meshcore-sniffer (project
+# root after a make install-style copy), then build/meshcore-sniffer (the
 # default cmake out-of-tree build path). Lets the test run from either the
 # project root or the build directory without symlink dances.
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ -n "$BIN" && -x "$BIN" ]]; then :;
-elif [[ -x "$HERE/meshtastic-sniffer" ]]; then BIN="$HERE/meshtastic-sniffer";
-elif [[ -x "$HERE/build/meshtastic-sniffer" ]]; then BIN="$HERE/build/meshtastic-sniffer";
+elif [[ -x "$HERE/meshcore-sniffer" ]]; then BIN="$HERE/meshcore-sniffer";
+elif [[ -x "$HERE/build/meshcore-sniffer" ]]; then BIN="$HERE/build/meshcore-sniffer";
 else
-    echo "FAIL: meshtastic-sniffer not found. Tried \$BIN, $HERE/, $HERE/build/."
+    echo "FAIL: meshcore-sniffer not found. Tried \$BIN, $HERE/, $HERE/build/."
     exit 1
 fi
 

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: CoT (Cursor-on-Target) XML multicast republish.
+ * meshcore-sniffer: CoT (Cursor-on-Target) XML multicast republish.
  *
  * Converts decoded packets with positional data into standard
  * Cursor-on-Target XML and broadcasts to a multicast group (default

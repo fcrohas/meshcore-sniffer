@@ -25,10 +25,10 @@ char *fftw_wisdom_default_path(void)
     char prefix[512];
 
     if (xdg && *xdg) {
-        snprintf(prefix, sizeof(prefix), "%s/meshtastic-sniffer", xdg);
+        snprintf(prefix, sizeof(prefix), "%s/meshcore-sniffer", xdg);
         base = prefix;
     } else if (home && *home) {
-        snprintf(prefix, sizeof(prefix), "%s/.cache/meshtastic-sniffer", home);
+        snprintf(prefix, sizeof(prefix), "%s/.cache/meshcore-sniffer", home);
         base = prefix;
     } else {
         return NULL;

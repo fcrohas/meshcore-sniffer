@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: CLI option parsing and shared runtime state.
+ * meshcore-sniffer: CLI option parsing and shared runtime state.
  *
  */
 
@@ -36,6 +36,7 @@ bool          opt_alert_off_grid      = false;
 bool          opt_list_devices        = false;
 bool          opt_print_schema        = false;
 bool          opt_trusted_only        = false;
+bool          opt_crc_bruteforce      = true;
 bool          opt_show_untrusted      = false;
 bool          opt_diagnostics         = false;
 deep_decode_mode_t opt_deep_decode    = DEEP_DECODE_AUTO;
@@ -62,6 +63,15 @@ char         *opt_share_url           = NULL;
 char         *opt_iq_record           = NULL;
 char         *opt_stats_json          = NULL;
 char         *opt_fftw_wisdom         = NULL;
+
+mesh_protocol_t opt_protocol          = MESH_PROTOCOL_MESHTASTIC;
+char         *opt_meshcore_channel[MESHCORE_CHANNEL_MAX] = { NULL };
+int           opt_meshcore_channel_count = 0;
+uint64_t      opt_meshcore_freq_hz    = 0;
+int           opt_meshcore_sf         = 11;
+int           opt_meshcore_bw_hz      = 250000;
+int           opt_meshcore_cr         = 5;
+bool          opt_meshcore_no_default_channel = false;
 char         *opt_webhook_url         = NULL;
 char         *opt_webhook_on          = NULL;
 char         *opt_webhook_format      = NULL;
@@ -88,6 +98,9 @@ int   agc_enabled       = 0;        /* used by rtlsdr.c */
 int   airspy_gain_val   = -1;
 char *sdrplay_serial    = NULL;
 int   sdrplay_gain_val  = 40;
+int   sdrplay_lna_state = -1;
+int   sdrplay_agc_mode  = -1;
+int   sdrplay_agc_setpoint_dbfs = -30;
 int   soapy_num         = -1;
 char *soapy_args        = NULL;
 char *soapy_gain_elem_names[SOAPY_GAINS_MAX];
@@ -128,7 +141,15 @@ char *opt_api_token               = NULL;
 char *opt_pcap_path               = NULL;
 char *opt_pcap_fifo               = NULL;
 char *opt_psk_wordlist            = NULL;
+#ifdef MC_DEFAULT_HASHTAG_WORDLIST
+char *opt_meshcore_hashtag_wordlist = MC_DEFAULT_HASHTAG_WORDLIST;
+#else
+char *opt_meshcore_hashtag_wordlist = NULL;
+#endif
+bool  opt_meshcore_no_hashtag_dict = false;
 char *opt_archive_dir             = NULL;
+char *opt_sqlite_db               = NULL;
+double opt_history_replay_hours   = 24.0;
 char *opt_geofence_file           = NULL;
 
 void options_print_help(const char *prog)
@@ -145,6 +166,7 @@ void options_print_help(const char *prog)
         "                         (stats counters still tally everything; only publishing is filtered)\n"
         "  --show-untrusted       include CRC-fail/no-CRC events even when --trusted-only is set\n"
         "                         (kept off by default in deep-decode-auto mode)\n"
+        "  --no-crc-bruteforce    disable single-bit CRC brute-force recovery of CRC-fail frames (on by default)\n"
         "\n"
         "Scan-then-focus deep decode (wideband scanner always on, focused workers wake on activity):\n"
         "  --deep-decode=MODE     off | auto (default auto). 'auto' enables the focused-worker pool\n"
@@ -209,6 +231,18 @@ void options_print_help(const char *prog)
         "                         Overrides whatever --gain mapped.\n"
         "  --hackrf-amp           HackRF: enable the 14 dB front-end amp.\n"
         "  --hackrf-amp-off       HackRF: disable the front-end amp (default).\n"
+        "  --sdrplay-lna=N        SDRplay: explicit LNA reduction state (0 = least\n"
+        "                         reduction/most sensitive). Valid max is model- and\n"
+        "                         band-dependent (RSP2: 0..8; RSPdx: 0..19/20; ...);\n"
+        "                         default 0. Applies whether AGC is on or off -- AGC\n"
+        "                         only ever adjusts IF gain reduction (gRdB), never LNA.\n"
+        "  --sdrplay-agc          SDRplay: force AGC on (overrides --gain's sign).\n"
+        "  --sdrplay-agc-off      SDRplay: force manual gain / AGC off, using --gain's\n"
+        "                         value as gRdB (20..59 dB). Default: --gain=40 already\n"
+        "                         implies this.\n"
+        "  --sdrplay-agc-setpoint=DBFS\n"
+        "                         SDRplay: AGC target level in dBFS (default -30).\n"
+        "                         Only meaningful when AGC is on.\n"
         "  --bias-tee             enable antenna bias tee where supported\n"
         "  --ppm=PPM              SDR oscillator correction\n"
         "  --clock=internal|external|gpsdo\n"
@@ -216,6 +250,25 @@ void options_print_help(const char *prog)
         "                         (UHD set_clock_source / set_time_source); other\n"
         "                         backends ignore. 'external' = 10 MHz + 1PPS in;\n"
         "                         'gpsdo' = internal GPSDO daughtercard.\n"
+        "\n"
+        "Protocol:\n"
+        "  --protocol=NAME        meshtastic (default) | meshcore\n"
+        "  --meshcore-channel=NAME:SECRET\n"
+        "                         MeshCore GRP_TXT/GRP_DATA channel secret, decoding to\n"
+        "                         16 or 32 raw bytes. Accepts hex (32/64 hex chars) or\n"
+        "                         standard base64 (as used natively by the official\n"
+        "                         MeshCore app's addChannel), repeatable, max %d\n"
+        "  --meshcore-no-default-channel\n"
+        "                         don't auto-load the official app's default \"Public\"\n"
+        "                         channel (PSK izOH6cXN6mrJ5e26oRXNcg==) or the built-in\n"
+        "                         hashtag channel list (test, bot, meteo, fr, fr-30, fr-34,\n"
+        "                         fr-occ -- secrets derived from name, see --meshcore-channel);\n"
+        "                         by default all of these are preloaded so --protocol=meshcore\n"
+        "                         works out of the box\n"
+        "  --meshcore-freq=HZ     MeshCore decoder center frequency (no region table)\n"
+        "  --meshcore-sf=N        MeshCore spread factor (default 11)\n"
+        "  --meshcore-bw=HZ       MeshCore bandwidth in Hz (default 250000)\n"
+        "  --meshcore-cr=N        MeshCore coding rate 5..8 = 4/5..4/8 (default 5)\n"
         "\n"
         "Meshtastic:\n"
         "  --region=NAME          US|EU_868|EU_433|CN|JP|ANZ|...|LORA_24\n"
@@ -229,8 +282,8 @@ void options_print_help(const char *prog)
         "                         keys does not slow per-packet decode.\n"
         "                         Also reads MESHTASTIC_KEYS env var.\n"
         "  --keys-file=PATH       load keys from a file (one SPEC per line, # comments ok).\n"
-        "                         Also tried at $XDG_CONFIG_HOME/meshtastic-sniffer/keys\n"
-        "                         and ~/.config/meshtastic-sniffer/keys by default.\n"
+        "                         Also tried at $XDG_CONFIG_HOME/meshcore-sniffer/keys\n"
+        "                         and ~/.config/meshcore-sniffer/keys by default.\n"
         "  --share-url=URL        import a meshtastic.org/e/ channel-share URL at startup\n"
         "  --extra-freq=SPEC      add a non-standard decoder slot. SPEC is\n"
         "                         HZ:bw=BW:sf=SF:cr=CR (repeatable, max %d)\n"
@@ -238,8 +291,8 @@ void options_print_help(const char *prog)
         "  --stats-json=PATH      write per-channel stats JSON every 5s (rotates)\n"
         "  --fftw-wisdom[=PATH]   load/save FFTW plan timing data so cold starts skip\n"
         "                         the FFTW_MEASURE benchmark (off by default). Without\n"
-        "                         PATH uses $XDG_CACHE_HOME/meshtastic-sniffer/fftw.wisdom\n"
-        "                         or $HOME/.cache/meshtastic-sniffer/fftw.wisdom.\n"
+        "                         PATH uses $XDG_CACHE_HOME/meshcore-sniffer/fftw.wisdom\n"
+        "                         or $HOME/.cache/meshcore-sniffer/fftw.wisdom.\n"
         "  --webhook-url=URL      POST JSON event lines to URL on a background thread.\n"
         "                         Non-blocking; bounded queue; never stalls decode.\n"
         "                         Default allowlist: PSK_DISCOVERED, OFF_GRID_LORA,\n"
@@ -279,9 +332,41 @@ void options_print_help(const char *prog)
         "                         as --keys: default | simpleN | hex:HHHH... |\n"
         "                         base64:...). Discovered keys auto-add to the\n"
         "                         runtime keyset; PSK_DISCOVERED events fire per hit.\n"
+        "  --meshcore-hashtag-wordlist=PATH\n"
+        "                         background dictionary attack on undecrypted MeshCore\n"
+        "                         GRP_TXT/GRP_DATA frames -- one candidate channel name\n"
+        "                         per line (case variants tried automatically). ON BY\n"
+        "                         DEFAULT using a bundled ~23k-word French list (MIT\n"
+        "                         licensed, recover/wordlists/); pass this flag to use\n"
+        "                         your own list instead. Only applies to hashtag channels\n"
+        "                         (secret derived from the name, see --meshcore-channel);\n"
+        "                         private channels use a real random PSK and aren't in\n"
+        "                         scope. Discovered channels auto-add to the runtime\n"
+        "                         channelset; MC_CHANNEL_DISCOVERED events fire per hit.\n"
+        "                         See also the standalone meshcore-recover tool for\n"
+        "                         offline, single-frame cracking.\n"
+        "  --no-meshcore-hashtag-dict\n"
+        "                         disable the hashtag-channel dictionary attack entirely\n"
+        "                         (skips it even with the bundled default wordlist).\n"
         "  --archive=DIR          long-term JSONL archive. Every emitted event is\n"
         "                         appended to DIR/meshtastic-YYYYMMDD.jsonl.gz\n"
         "                         (gzipped, daily rotation at UTC midnight).\n"
+        "  --sqlite-db=PATH       persist every emitted event as a structured row in\n"
+        "                         a SQLite DB at PATH (created if absent). Requires\n"
+        "                         the build to have found libsqlite3; no-op otherwise.\n"
+        "                         Also enables cross-restart recovery: on startup the\n"
+        "                         full node list reloads from the DB (uncapped -- so\n"
+        "                         path-drawing/labels work immediately, not just for\n"
+        "                         nodes seen since the restart), and recent events\n"
+        "                         replay into the web dashboard's SSE history so the\n"
+        "                         first browser connection after a restart isn't blank.\n"
+        "                         See --history-replay-hours to size that window.\n"
+        "  --history-replay-hours=N\n"
+        "                         with --sqlite-db, replay events from the last N hours\n"
+        "                         into the dashboard on startup (default 24; <= 0 disables\n"
+        "                         event replay -- node list reload always still happens).\n"
+        "                         Bounded by the dashboard's own 1024-event ring regardless\n"
+        "                         of how many rows N hours matches.\n"
         "  --geofence=PATH        load polygons from PATH (INI-style: [name]\n"
         "                         section + lat,lon vertices, one per line).\n"
         "                         Emits GEOFENCE_ENTRY / GEOFENCE_EXIT events when\n"
@@ -325,7 +410,7 @@ void options_print_help(const char *prog)
         "  --schema               print JSON Schema for the event format and exit\n"
         "  -v, --verbose          INFO+WARN diagnostics (-vv DEBUG, -vvv TRACE)\n"
         "  -h, --help\n",
-        prog, EXTRA_FREQ_MAX, FEED_MAX);
+        prog, MESHCORE_CHANNEL_MAX, EXTRA_FREQ_MAX, FEED_MAX);
 }
 
 /* Parse "f_hz:bw=BW:sf=SF:cr=CR" (BW/SF/CR optional, defaults match LongFast). */
@@ -375,14 +460,19 @@ int options_parse(int argc, char **argv)
         O_USRP, O_VITA49, O_FILE, O_IQ_FORMAT,
         O_CENTER, O_RATE, O_GAIN, O_BIAS, O_PPM, O_CLOCK,
         O_REGION, O_PRESETS, O_KEYS, O_KEYS_FILE, O_SHARE_URL, O_EXTRA_FREQ,
+        O_PROTOCOL, O_MESHCORE_CHANNEL, O_MESHCORE_FREQ, O_MESHCORE_SF,
+        O_MESHCORE_BW, O_MESHCORE_CR, O_MESHCORE_NO_DEFAULT_CHANNEL,
+        O_NO_MESHCORE_HASHTAG_DICT,
         O_IQ_RECORD, O_STATS_JSON, O_FFTW_WISDOM,
         O_WEBHOOK_URL, O_WEBHOOK_ON, O_WEBHOOK_FORMAT, O_WEBHOOK_TIMEOUT_MS,
         O_FEED, O_MQTT, O_MQTT_TOPIC, O_ZMQ, O_COT, O_WEB, O_STATION, O_GPSD, O_API_TOKEN,
-        O_PCAP, O_PCAP_FIFO, O_PSK_WORDLIST, O_ARCHIVE, O_GEOFENCE, O_ANNOUNCE_TO, O_C2_DEALER,
+        O_PCAP, O_PCAP_FIFO, O_PSK_WORDLIST, O_MESHCORE_HASHTAG_WORDLIST,
+        O_ARCHIVE, O_SQLITE_DB, O_HISTORY_REPLAY_HOURS, O_GEOFENCE, O_ANNOUNCE_TO, O_C2_DEALER,
         O_ZMQ_CURVE_SECRET, O_ZMQ_CURVE_KEYGEN, O_STATION_T_ACC_NS,
         O_HACKRF_LNA, O_HACKRF_VGA, O_HACKRF_AMP, O_HACKRF_AMP_OFF, O_USRP_OTW,
+        O_SDRPLAY_LNA, O_SDRPLAY_AGC, O_SDRPLAY_AGC_OFF, O_SDRPLAY_AGC_SETPOINT,
         O_DECODE, O_SCAN, O_SCAN_DEC, O_ALERT_OFF_GRID, O_TRUSTED_ONLY,
-        O_SHOW_UNTRUSTED, O_DIAGNOSTICS,
+        O_SHOW_UNTRUSTED, O_DIAGNOSTICS, O_NO_CRC_BRUTEFORCE,
         O_DEEP_DECODE, O_FOCUS_WORKERS, O_FOCUS_HOLD_S, O_FOCUS_REWIND_MS,
         O_FOCUS_FREQS, O_FOCUS_RING_MS, O_FOCUS_MIN_SNR_DB, O_FOCUS_OS,
         O_SNAPSHOT_STORE, O_SNAPSHOT_PRE_MS, O_SNAPSHOT_POST_MS,
@@ -402,6 +492,10 @@ int options_parse(int argc, char **argv)
         { "rtlsdr",     optional_argument, NULL, O_RTLSDR },
         { "soapy",      required_argument, NULL, O_SOAPY },
         { "sdrplay",    optional_argument, NULL, O_SDRPLAY },
+        { "sdrplay-lna", required_argument, NULL, O_SDRPLAY_LNA },
+        { "sdrplay-agc", no_argument,       NULL, O_SDRPLAY_AGC },
+        { "sdrplay-agc-off", no_argument,   NULL, O_SDRPLAY_AGC_OFF },
+        { "sdrplay-agc-setpoint", required_argument, NULL, O_SDRPLAY_AGC_SETPOINT },
         { "airspy",     optional_argument, NULL, O_AIRSPY },
         { "usrp",       optional_argument, NULL, O_USRP },
         { "usrp-otw",   required_argument, NULL, O_USRP_OTW },
@@ -419,6 +513,14 @@ int options_parse(int argc, char **argv)
         { "keys",       required_argument, NULL, O_KEYS },
         { "keys-file",  required_argument, NULL, O_KEYS_FILE },
         { "share-url",  required_argument, NULL, O_SHARE_URL },
+        { "protocol",         required_argument, NULL, O_PROTOCOL },
+        { "meshcore-channel", required_argument, NULL, O_MESHCORE_CHANNEL },
+        { "meshcore-freq",    required_argument, NULL, O_MESHCORE_FREQ },
+        { "meshcore-sf",      required_argument, NULL, O_MESHCORE_SF },
+        { "meshcore-bw",      required_argument, NULL, O_MESHCORE_BW },
+        { "meshcore-cr",      required_argument, NULL, O_MESHCORE_CR },
+        { "meshcore-no-default-channel", no_argument, NULL, O_MESHCORE_NO_DEFAULT_CHANNEL },
+        { "no-meshcore-hashtag-dict", no_argument, NULL, O_NO_MESHCORE_HASHTAG_DICT },
         { "iq-record",  required_argument, NULL, O_IQ_RECORD },
         { "stats-json", required_argument, NULL, O_STATS_JSON },
         { "fftw-wisdom", optional_argument, NULL, O_FFTW_WISDOM },
@@ -439,7 +541,10 @@ int options_parse(int argc, char **argv)
         { "pcap",       required_argument, NULL, O_PCAP },
         { "pcap-fifo",  required_argument, NULL, O_PCAP_FIFO },
         { "psk-wordlist", required_argument, NULL, O_PSK_WORDLIST },
+        { "meshcore-hashtag-wordlist", required_argument, NULL, O_MESHCORE_HASHTAG_WORDLIST },
         { "archive",    required_argument, NULL, O_ARCHIVE },
+        { "sqlite-db",  required_argument, NULL, O_SQLITE_DB },
+        { "history-replay-hours", required_argument, NULL, O_HISTORY_REPLAY_HOURS },
         { "geofence",   required_argument, NULL, O_GEOFENCE },
         { "announce-to", required_argument, NULL, O_ANNOUNCE_TO },
         { "c2-dealer", required_argument, NULL, O_C2_DEALER },
@@ -453,6 +558,7 @@ int options_parse(int argc, char **argv)
         { "trusted-only",    no_argument,       NULL, O_TRUSTED_ONLY },
         { "show-untrusted",  no_argument,       NULL, O_SHOW_UNTRUSTED },
         { "diagnostics",     no_argument,       NULL, O_DIAGNOSTICS },
+        { "no-crc-bruteforce", no_argument,     NULL, O_NO_CRC_BRUTEFORCE },
         { "deep-decode",     required_argument, NULL, O_DEEP_DECODE },
         { "focus-workers",   required_argument, NULL, O_FOCUS_WORKERS },
         { "focus-hold-s",    required_argument, NULL, O_FOCUS_HOLD_S },
@@ -496,6 +602,16 @@ int options_parse(int argc, char **argv)
         case O_SOAPY:   if (set_backend(SDR_BACKEND_SOAPYSDR, optarg) < 0) return 2;
                         soapy_args = optarg ? strdup(optarg) : NULL; break;
         case O_SDRPLAY: if (set_backend(SDR_BACKEND_SDRPLAY, optarg) < 0) return 2; break;
+        case O_SDRPLAY_LNA: {
+            int lna = atoi(optarg);
+            if (lna < 0) lna = 0;
+            if (lna > 27) lna = 27;  /* generous upper bound; real max is model/band-dependent */
+            sdrplay_lna_state = lna;
+            break;
+        }
+        case O_SDRPLAY_AGC:     sdrplay_agc_mode = 1; break;
+        case O_SDRPLAY_AGC_OFF: sdrplay_agc_mode = 0; break;
+        case O_SDRPLAY_AGC_SETPOINT: sdrplay_agc_setpoint_dbfs = atoi(optarg); break;
         case O_AIRSPY:  if (set_backend(SDR_BACKEND_AIRSPY,  optarg) < 0) return 2; break;
         case O_USRP:    if (set_backend(SDR_BACKEND_USRP,    optarg) < 0) return 2;
                         /* optarg may be NULL when --usrp is passed without
@@ -572,6 +688,21 @@ int options_parse(int argc, char **argv)
         case O_KEYS:       opt_keys_csv   = strdup(optarg); break;
         case O_KEYS_FILE:  opt_keys_file  = strdup(optarg); break;
         case O_SHARE_URL:  opt_share_url  = strdup(optarg); break;
+        case O_PROTOCOL:
+            if      (!strcasecmp(optarg, "meshtastic")) opt_protocol = MESH_PROTOCOL_MESHTASTIC;
+            else if (!strcasecmp(optarg, "meshcore"))   opt_protocol = MESH_PROTOCOL_MESHCORE;
+            else { fprintf(stderr, "--protocol must be meshtastic|meshcore (got %s)\n", optarg); return 2; }
+            break;
+        case O_MESHCORE_CHANNEL:
+            if (opt_meshcore_channel_count < MESHCORE_CHANNEL_MAX)
+                opt_meshcore_channel[opt_meshcore_channel_count++] = strdup(optarg);
+            break;
+        case O_MESHCORE_FREQ: opt_meshcore_freq_hz = strtoull(optarg, NULL, 10); break;
+        case O_MESHCORE_SF:   opt_meshcore_sf      = atoi(optarg); break;
+        case O_MESHCORE_BW:   opt_meshcore_bw_hz   = atoi(optarg); break;
+        case O_MESHCORE_CR:   opt_meshcore_cr      = atoi(optarg); break;
+        case O_MESHCORE_NO_DEFAULT_CHANNEL: opt_meshcore_no_default_channel = true; break;
+        case O_NO_MESHCORE_HASHTAG_DICT: opt_meshcore_no_hashtag_dict = true; break;
         case O_IQ_RECORD:  opt_iq_record  = strdup(optarg); break;
         case O_STATS_JSON: opt_stats_json = strdup(optarg); break;
         case O_FFTW_WISDOM:
@@ -612,7 +743,10 @@ int options_parse(int argc, char **argv)
         case O_PCAP:       opt_pcap_path = strdup(optarg); break;
         case O_PCAP_FIFO:  opt_pcap_fifo = strdup(optarg); break;
         case O_PSK_WORDLIST: opt_psk_wordlist = strdup(optarg); break;
+        case O_MESHCORE_HASHTAG_WORDLIST: opt_meshcore_hashtag_wordlist = strdup(optarg); break;
         case O_ARCHIVE:    opt_archive_dir = strdup(optarg); break;
+        case O_SQLITE_DB:  opt_sqlite_db   = strdup(optarg); break;
+        case O_HISTORY_REPLAY_HOURS: opt_history_replay_hours = atof(optarg); break;
         case O_GEOFENCE:   opt_geofence_file = strdup(optarg); break;
         case O_ANNOUNCE_TO: opt_announce_to = strdup(optarg); break;
         case O_C2_DEALER:  opt_c2_dealer = strdup(optarg); break;
@@ -631,6 +765,7 @@ int options_parse(int argc, char **argv)
         case O_TRUSTED_ONLY:     opt_trusted_only   = true; break;
         case O_SHOW_UNTRUSTED:   opt_show_untrusted = true; break;
         case O_DIAGNOSTICS:      opt_diagnostics    = true; break;
+        case O_NO_CRC_BRUTEFORCE:opt_crc_bruteforce = false; break;
         case O_DEEP_DECODE:
             if (!strcasecmp(optarg, "off"))       opt_deep_decode = DEEP_DECODE_OFF;
             else if (!strcasecmp(optarg, "auto")) opt_deep_decode = DEEP_DECODE_AUTO;

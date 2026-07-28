@@ -4,7 +4,7 @@
 # Usage:
 #   tests/soak_usrp.sh [out-dir]
 #
-# Defaults to /tmp/soak-<timestamp>. Launches meshtastic-sniffer against the
+# Defaults to /tmp/soak-<timestamp>. Launches meshcore-sniffer against the
 # B-series USRP at 26 Msps, sc8 wire format, US --presets=all. Samples
 # /proc/<pid>/status every 30s into a CSV so memory/threads/fd-leak
 # regressions show up as a slope. Writes a summary verdict on shutdown.
@@ -19,7 +19,7 @@ OUT_DIR="${1:-/tmp/soak-$(date +%Y%m%dT%H%M%S)}"
 mkdir -p "$OUT_DIR"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$REPO/build/meshtastic-sniffer"
+BIN="$REPO/build/meshcore-sniffer"
 [ -x "$BIN" ] || { echo "build the sniffer first: $BIN missing" >&2; exit 1; }
 
 FRAMES="$OUT_DIR/frames.jsonl"

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: LoRa CSS demodulator.
+ * meshcore-sniffer: LoRa CSS demodulator.
  *
  * One instance per (channel center, BW, SF, CR). Fed baseband samples
  * by the channelizer at exactly bw_hz. Emits decoded LoRa frames
@@ -39,6 +39,13 @@ typedef struct lora_frame_meta {
     bool     has_crc;
     bool     header_crc_ok;
     bool     payload_crc_ok;
+    /* Set when payload_crc_ok is true only because
+     * lora_crc_bruteforce_correct() found a single bit flip that makes
+     * the CRC verify -- distinct from a clean first-pass CRC match, so
+     * consumers can report provenance (Analyzer tab, SQLite) without
+     * treating a corrected frame as untrustworthy: a single-bit CRC16
+     * match is not a coincidence at any realistic payload length. */
+    bool     crc_corrected;
     float    rssi_db;       /* indicated by demodulator (estimated) */
     float    snr_db;
     float    cfo_hz;        /* carrier frequency offset estimate */
@@ -133,6 +140,13 @@ void lora_decoder_set_stream_cursor(lora_decoder_t *dec,
  * SFO path inert. Must be called before decode if you want compensation. */
 void lora_decoder_set_center_freq(lora_decoder_t *dec, double center_freq_hz);
 
+/* Enable/disable single-bit CRC brute-force recovery for this decoder
+ * instance (see lora_crc_bruteforce_correct below). Defaults on in
+ * lora_decoder_create[_os](). Per-instance rather than a process-global
+ * flag so lora.c stays link-clean for the diagnostic test executables
+ * that use it standalone, without pulling in options.c. */
+void lora_decoder_set_crc_bruteforce(lora_decoder_t *dec, bool enable);
+
 /* Feed one batch of complex baseband samples (rate = bw_hz). */
 void lora_decoder_feed(lora_decoder_t *dec,
                        const float complex *samples, size_t n);
@@ -161,6 +175,18 @@ void lora_dewhiten(uint8_t *data, size_t len);
  * XOR'd with last two bytes per the LoRa spec quirk.  Returns the
  * computed CRC for `data[0..len-1]`. */
 uint16_t lora_crc16(const uint8_t *data, size_t len);
+
+/* Single-bit CRC brute-force recovery: on a CRC16 mismatch, try
+ * flipping each bit of bytes[0 .. byte_count-3] (the payload, not the
+ * 2-byte CRC trailer) one at a time and recompute the CRC (same
+ * LoRa XOR-tail convention as the inline check in state_tick()) after
+ * each flip. Stops and keeps the flip on the first match (bytes[] is
+ * left corrected); restores the original bytes and returns false if no
+ * single-bit flip recovers it. O(byte_count^2) work, but only ever
+ * runs on frames that already failed the cheap CRC check, so the cost
+ * is negligible against demod cost even at high frame rates. Exposed
+ * here (pure function, no decoder state) for direct unit testing. */
+bool lora_crc_bruteforce_correct(uint8_t *bytes, size_t byte_count);
 
 /* Diagonal deinterleave: cr_use codewords of (sf_app=sf-2 | sf) bits each
  * are stored by row at the demod output; we read them back diagonally

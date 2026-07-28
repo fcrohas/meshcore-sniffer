@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: JSON Schema for the event format.
+ * meshcore-sniffer: JSON Schema for the event format.
  *
  * Documents the JSON shape that feed.c emits to stdout / UDP / MQTT /
  * ZMQ. Output by '--schema' so SIEM consumers can validate without
@@ -23,8 +23,8 @@ const char *schema_json_text(void)
     static const char SCHEMA[] =
 "{\n"
 "  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",\n"
-"  \"$id\": \"https://github.com/cemaxecuter/meshtastic-sniffer/event.schema.json\",\n"
-"  \"title\": \"meshtastic-sniffer event\",\n"
+"  \"$id\": \"https://github.com/cemaxecuter/meshcore-sniffer/event.schema.json\",\n"
+"  \"title\": \"meshcore-sniffer event\",\n"
 "  \"description\": \"One JSON object per emitted event. Packet events carry the radio header + per-port decoded fields; STATS / OFF_GRID_LORA / REPLAY_SUSPECTED carry a top-level 'event' discriminator.\",\n"
 "  \"oneOf\": [\n"
 "    { \"$ref\": \"#/$defs/PacketEvent\" },\n"

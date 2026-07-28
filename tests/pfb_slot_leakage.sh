@@ -38,7 +38,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$REPO/build/meshtastic-sniffer"
+BIN="$REPO/build/meshcore-sniffer"
 GEN="$REPO/tools/gen_meshtastic_iq.py"
 [ -x "$BIN" ] || { echo "build the sniffer first" >&2; exit 1; }
 

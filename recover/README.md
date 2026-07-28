@@ -5,11 +5,11 @@ the Meshtastic audit suite.
 
 ## What it does
 
-Reads a libpcap file produced by `meshtastic-sniffer --pcap=PATH` and a
+Reads a libpcap file produced by `meshcore-sniffer --pcap=PATH` and a
 wordlist of candidate keys, and prints any keys that successfully
 decrypt one or more captured frames. Output is in `--keys-file=`
 compatible format so you can immediately re-feed the recovered keys to
-`meshtastic-sniffer` to decrypt past or future traffic on those
+`meshcore-sniffer` to decrypt past or future traffic on those
 channels.
 
 ## Why it exists
@@ -60,7 +60,7 @@ recovered instantly from this pass.
 
 ```bash
 # Capture some encrypted traffic with the sniffer
-./meshtastic-sniffer --hackrf --pcap=/tmp/session.pcap
+./meshcore-sniffer --hackrf --pcap=/tmp/session.pcap
 
 # Recover keys from the capture
 ./meshtastic-recover --pcap=/tmp/session.pcap \
@@ -69,7 +69,7 @@ recovered instantly from this pass.
                      --output=/tmp/recovered.keys
 
 # Re-decode the same capture with the recovered keys
-./meshtastic-sniffer --file=/tmp/session.pcap --keys-file=/tmp/recovered.keys
+./meshcore-sniffer --file=/tmp/session.pcap --keys-file=/tmp/recovered.keys
 ```
 
 ### Flags
@@ -122,7 +122,7 @@ the parent project:
 ```bash
 cd .. && mkdir -p build && cd build
 cmake .. && make -j$(nproc)
-# produces both build/meshtastic-sniffer and build/meshtastic-recover
+# produces both build/meshcore-sniffer and build/meshtastic-recover
 ```
 
 It links against OpenSSL (for AES-CTR). No FFTW / SDR dependencies --

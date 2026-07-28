@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: polyphase channelizer.
+ * meshcore-sniffer: polyphase channelizer.
  *
  * Replaces the old per-channel cascade DDC with one polyphase filterbank
  * per unique channel BW. The PFB processes the SDR stream once at full

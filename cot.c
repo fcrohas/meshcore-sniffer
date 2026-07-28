@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: CoT (Cursor-on-Target) XML multicast republish.
+ * meshcore-sniffer: CoT (Cursor-on-Target) XML multicast republish.
  *
  */
 
@@ -209,7 +209,7 @@ void cot_publish_atak(const mesh_event_t *ev, const mesh_atak_t *atak)
         "<__group name=\"%s\" role=\"%s\"/>"
         "<track speed=\"%u\" course=\"%u\"/>"
         "<status battery=\"%u\"/>"
-        "<remarks>meshtastic-sniffer atak/from=!%08x</remarks>"
+        "<remarks>meshcore-sniffer atak/from=!%08x</remarks>"
         "</detail>"
         "</event>",
         uid, cot_type_for_atak(atak), now, now, stale,

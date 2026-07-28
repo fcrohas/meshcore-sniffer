@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: wideband Meshtastic LoRa receiver.
+ * meshcore-sniffer: wideband Meshtastic LoRa receiver.
  *
  * Captures a single wide IQ slice from one SDR, channelizes into every
  * configured Meshtastic preset/channel, runs a LoRa CSS demod per
@@ -16,6 +16,7 @@
 #include "channelizer.h"
 #include "announce.h"
 #include "archive.h"
+#include "db_sqlite.h"
 #include "c2_dealer.h"
 #include "dedup.h"
 #include "feed.h"
@@ -34,6 +35,9 @@
 #include "keyset.h"
 #include "lora.h"
 #include "mesh_packet.h"
+#include "meshcore.h"
+#include "meshcore_decoders.h"
+#include "meshcore_hashtag_dict.h"
 #include "meshtastic.h"
 #include "options.h"
 #include "scanner.h"
@@ -172,6 +176,7 @@ static int               g_focused_manual_channel_id = -1;
 static char              g_focused_manual_spec[128];
 static uint64_t          g_focused_manual_start_sample = 0;
 static keyset_t      *g_keys = NULL;
+static meshcore_channelset_t *g_meshcore_channels = NULL;
 static lora_decoder_t *g_demods[CHANNELIZER_MAX_CHANNELS];
 static scanner_t     *g_scanner = NULL;
 static uint64_t       g_grid_freqs[CHANNELIZER_MAX_CHANNELS];
@@ -180,6 +185,7 @@ static int            g_grid_count = 0;
 
 /* Accessors used by web.c for /api endpoints. */
 keyset_t *app_get_keyset(void) { return g_keys; }
+meshcore_channelset_t *app_get_meshcore_channels(void) { return g_meshcore_channels; }
 int app_grid_count(void)       { return g_grid_count; }
 const uint64_t *app_grid_freqs(void) { return g_grid_freqs; }
 const int      *app_grid_bws  (void) { return g_grid_bws;   }
@@ -213,7 +219,8 @@ static double  g_iq_record_peak_mag2 = 0; /* max |sample|^2 observed */
 
 /* Per-channel rolling stats for --stats-json. Bumped from on_lora_frame
  * by channel id, dumped every 5s to stats-json file (rotates in place). */
-#define CHAN_SNR_HISTORY_BUCKETS 60   /* one minute each = 1 hour of history */
+#define CHAN_SNR_HISTORY_BUCKETS 288  /* 5 min each = 24 hours of history */
+#define CHAN_SNR_BUCKET_SECS     300
 typedef struct {
     uint64_t frames;
     uint64_t decrypted;
@@ -229,16 +236,16 @@ typedef struct {
     uint64_t freq_hz;
     char     preset_name[24];
 
-    /* Rolling per-minute SNR history. Sliced into CHAN_SNR_HISTORY_BUCKETS
-     * buckets, one per wall-clock minute. snr_history_last_min is the
-     * unix-minute the most recent bucket covers; on a new minute the head
-     * advances and any skipped buckets are cleared. Only frames with
-     * payload_crc_ok feed this so the sparkline tracks real packet
-     * quality, not ambient noise or CRC-fail leakage. */
+    /* Rolling SNR history. Sliced into CHAN_SNR_HISTORY_BUCKETS buckets,
+     * one per CHAN_SNR_BUCKET_SECS-wide wall-clock window. snr_history_last_bucket
+     * is the bucket index (unix seconds / CHAN_SNR_BUCKET_SECS) the most recent
+     * bucket covers; on a new bucket the head advances and any skipped buckets
+     * are cleared. Only frames with payload_crc_ok feed this so the sparkline
+     * tracks real packet quality, not ambient noise or CRC-fail leakage. */
     double   snr_history_sum[CHAN_SNR_HISTORY_BUCKETS];
     uint16_t snr_history_count[CHAN_SNR_HISTORY_BUCKETS];
     int      snr_history_head;        /* index of the current (newest) bucket */
-    uint64_t snr_history_last_min;    /* unix epoch seconds / 60 */
+    uint64_t snr_history_last_bucket; /* unix epoch seconds / CHAN_SNR_BUCKET_SECS */
 } chan_stat_t;
 static chan_stat_t g_chan_stats[CHANNELIZER_MAX_CHANNELS];
 /* Guards the non-atomic fields in chan_stat_t -- snr_db_sum (double) and
@@ -810,6 +817,7 @@ typedef struct {
     int      channel_id;
     bool     has_crc;
     bool     payload_crc_ok;
+    bool     crc_corrected;
     float    cfo_hz;
     uint64_t station_t_ns;     /* first-replica realtime ns */
     uint32_t station_t_acc_ns; /* operator-self-reported clock-discipline class */
@@ -831,6 +839,7 @@ static void on_mesh_event(const mesh_event_t *ev, void *user) {
     if (ctx) {
         stamped.has_crc          = ctx->has_crc;
         stamped.payload_crc_ok   = ctx->payload_crc_ok;
+        stamped.crc_corrected    = ctx->crc_corrected;
         stamped.cfo_hz           = ctx->cfo_hz;
         stamped.station_t_ns     = ctx->station_t_ns;
         stamped.station_t_acc_ns = ctx->station_t_acc_ns;
@@ -860,7 +869,13 @@ static void on_mesh_event(const mesh_event_t *ev, void *user) {
         if (channel_id >= 0 && channel_id < CHANNELIZER_MAX_CHANNELS)
             __atomic_add_fetch(&g_chan_stats[channel_id].decrypted, 1, __ATOMIC_RELAXED);
     }
-    replay_check(&stamped);
+    /* replay_check() keys off ev->header.{from,packet_id}, which are
+     * Meshtastic protobuf fields -- always zero for MeshCore events, so
+     * every MeshCore frame looks like a replay of the same (0,0) tuple.
+     * MeshCore has its own per-payload-type identity (pubkey/channel
+     * hash, mc_timestamp) that isn't a drop-in fit for this ring; skip
+     * the check entirely for now rather than emit false positives. */
+    if (!stamped.is_meshcore) replay_check(&stamped);
     feed_publish_event(&stamped);
 }
 /* Drainer thread: every few ms, emit any cluster whose window has
@@ -887,22 +902,23 @@ static void dedup_emit_locked(const dedup_entry_t *e)
         pthread_mutex_lock(&g_chan_stats_mu);
         g_chan_stats[channel_id].snr_db_sum   += (double)e->best_meta.snr_db;
         g_chan_stats[channel_id].snr_db_count += 1;
-        /* Per-minute SNR history ring -- only count frames whose CRC passed
-         * (or had no CRC at all, treated as trusted). CRC-fail replicas are
-         * bit-corrupted phantoms whose SNR estimate would mislead. */
+        /* SNR history ring, one bucket per CHAN_SNR_BUCKET_SECS -- only count
+         * frames whose CRC passed (or had no CRC at all, treated as trusted).
+         * CRC-fail replicas are bit-corrupted phantoms whose SNR estimate
+         * would mislead. */
         bool trusted = !e->best_meta.has_crc || e->best_meta.payload_crc_ok;
         if (trusted) {
             chan_stat_t *cs = &g_chan_stats[channel_id];
-            uint64_t now_min = (uint64_t)time(NULL) / 60u;
-            if (cs->snr_history_last_min == 0) {
-                /* First sample: align to the current minute. */
-                cs->snr_history_last_min = now_min;
-            } else if (now_min > cs->snr_history_last_min) {
-                /* Advance the head one bucket per elapsed minute, clearing
-                 * skipped buckets so gaps in traffic show as gaps. Cap at
-                 * the ring size: if more than CHAN_SNR_HISTORY_BUCKETS
-                 * minutes elapsed, wipe the whole ring. */
-                uint64_t skipped = now_min - cs->snr_history_last_min;
+            uint64_t now_bucket = (uint64_t)time(NULL) / CHAN_SNR_BUCKET_SECS;
+            if (cs->snr_history_last_bucket == 0) {
+                /* First sample: align to the current bucket. */
+                cs->snr_history_last_bucket = now_bucket;
+            } else if (now_bucket > cs->snr_history_last_bucket) {
+                /* Advance the head one bucket per elapsed CHAN_SNR_BUCKET_SECS
+                 * window, clearing skipped buckets so gaps in traffic show as
+                 * gaps. Cap at the ring size: if more than
+                 * CHAN_SNR_HISTORY_BUCKETS windows elapsed, wipe the whole ring. */
+                uint64_t skipped = now_bucket - cs->snr_history_last_bucket;
                 if (skipped >= CHAN_SNR_HISTORY_BUCKETS) {
                     memset(cs->snr_history_sum, 0, sizeof(cs->snr_history_sum));
                     memset(cs->snr_history_count, 0, sizeof(cs->snr_history_count));
@@ -915,7 +931,7 @@ static void dedup_emit_locked(const dedup_entry_t *e)
                         cs->snr_history_count[cs->snr_history_head] = 0;
                     }
                 }
-                cs->snr_history_last_min = now_min;
+                cs->snr_history_last_bucket = now_bucket;
             }
             cs->snr_history_sum  [cs->snr_history_head] += (double)e->best_meta.snr_db;
             cs->snr_history_count[cs->snr_history_head] += 1;
@@ -936,6 +952,7 @@ static void dedup_emit_locked(const dedup_entry_t *e)
         .channel_id       = (int)channel_id,
         .has_crc          = e->best_meta.has_crc,
         .payload_crc_ok   = e->best_meta.payload_crc_ok,
+        .crc_corrected    = e->best_meta.crc_corrected,
         .cfo_hz           = e->best_meta.cfo_hz,
         .station_t_ns     = e->first_seen_t_ns,
         .station_t_acc_ns = (uint32_t)opt_station_t_acc_ns,
@@ -946,11 +963,19 @@ static void dedup_emit_locked(const dedup_entry_t *e)
         .preamble_lock_sample_frac = e->best_meta.preamble_lock_sample_frac,
         .preamble_lock_t_ns        = e->best_meta.preamble_lock_t_ns,
     };
-    mesh_packet_decode_with_radio(e->best_payload, e->best_payload_len,
-                                  e->best_meta.rssi_db, e->best_meta.snr_db,
-                                  e->best_meta.sf, e->best_meta.cr,
-                                  e->best_meta.bw_hz,
-                                  g_keys, on_mesh_event, &ctx);
+    if (opt_protocol == MESH_PROTOCOL_MESHCORE) {
+        meshcore_packet_decode_with_radio(e->best_payload, e->best_payload_len,
+                                          e->best_meta.rssi_db, e->best_meta.snr_db,
+                                          e->best_meta.sf, e->best_meta.cr,
+                                          e->best_meta.bw_hz,
+                                          g_meshcore_channels, on_mesh_event, &ctx);
+    } else {
+        mesh_packet_decode_with_radio(e->best_payload, e->best_payload_len,
+                                      e->best_meta.rssi_db, e->best_meta.snr_db,
+                                      e->best_meta.sf, e->best_meta.cr,
+                                      e->best_meta.bw_hz,
+                                      g_keys, on_mesh_event, &ctx);
+    }
 }
 
 /* Per-tick batch capacity. ~30 ms window x ~few hundred frames/sec
@@ -1069,6 +1094,13 @@ static int focus_os_for_slot(int bw_hz, int sf, int cr)
         return 1;
     }
     if (bw_hz == 125000 && sf >= 11) return 8;
+
+    /* Narrowband fallback (e.g. MeshCore BW<=125kHz not covered above,
+     * such as EU/UK BW=62500): os=1 leaves the fractional STO residual
+     * uncorrected in lora.c and causes systematic CRC failures despite
+     * good SNR. os=2 is confirmed on real hardware to fix this. */
+    if (bw_hz <= 125000) return 2;
+
     return 1;
 }
 
@@ -1441,19 +1473,19 @@ static void *stats_thread(void *arg)
             /* Per-channel SNR sparkline. Separate event so the fixed
              * sline[] buffer stays bounded; this one varies with how many
              * channels have recent traffic. Format:
-             *   {"event":"CHAN_SNR","ts":...,"channels":[{"id":N,"snr":[..60..]}, ...]}
+             *   {"event":"CHAN_SNR","ts":...,"channels":[{"id":N,"snr":[..288..]}, ...]}
              * Each sparkline value is a small int (rounded dB) or -1 to
-             * mean "no data in this minute." Only channels that have at
+             * mean "no data in this bucket." Only channels that have at
              * least one sample anywhere in the ring are emitted, so an
              * 800-channel grid with 5 active senders publishes 5 entries. */
             if (opt_web_port > 0 || opt_zmq_endpoint) {
-                /* Worst-case sizing: 256 bytes overhead + 360 bytes per slot
-                 * (id field + 60 ints averaging 3 chars each + commas + JSON
+                /* Worst-case sizing: 256 bytes overhead + ~1200 bytes per slot
+                 * (id field + 288 ints averaging 3 chars each + commas + JSON
                  * wrapping). At CHANNELIZER_MAX_CHANNELS=1024 this peaks
-                 * around 370 KB, but the has-data filter typically keeps
+                 * around 1.2 MB, but the has-data filter typically keeps
                  * actual emit at a few KB. Allocation is freed each tick. */
                 size_t cap = 256 +
-                    (size_t)CHANNELIZER_MAX_CHANNELS * 360;
+                    (size_t)CHANNELIZER_MAX_CHANNELS * 1200;
                 char *chan_snr = malloc(cap);
                 if (chan_snr) {
                     int csn = snprintf(chan_snr, cap,
@@ -1679,6 +1711,7 @@ static int instantiate_channel(uint64_t f_hz, int bw_hz, int sf, int cr)
     /* Per-slot RF carrier enables the SFO drift compensation path; without
      * it the decoder's gr-lora_sdr-style SFO logic stays inert. */
     lora_decoder_set_center_freq(g_demods[id], (double)f_hz);
+    lora_decoder_set_crc_bruteforce(g_demods[id], opt_crc_bruteforce);
     /* Stash channel id in user pointer so on_lora_frame can attribute stats. */
     lora_decoder_set_callback(g_demods[id], on_lora_frame, (void *)(intptr_t)id);
     /* Every wideband channel can promote to a focused worker via the
@@ -1715,8 +1748,34 @@ static int instantiate_channel(uint64_t f_hz, int bw_hz, int sf, int cr)
     return id;
 }
 
+/* MeshCore has no region/preset table -- a single decoder slot is
+ * instantiated from plain --meshcore-freq/-sf/-bw/-cr parameters. */
+static int build_channel_set_meshcore(void)
+{
+    if (!opt_meshcore_freq_hz) {
+        fprintf(stderr, "--protocol=meshcore requires --meshcore-freq=HZ\n");
+        return -1;
+    }
+    int id = instantiate_channel(opt_meshcore_freq_hz, opt_meshcore_bw_hz,
+                                 opt_meshcore_sf, opt_meshcore_cr);
+    if (id < 0) {
+        fprintf(stderr, "meshcore: failed to instantiate decoder slot "
+                "(freq=%llu bw=%d sf=%d cr=%d)\n",
+                (unsigned long long)opt_meshcore_freq_hz, opt_meshcore_bw_hz,
+                opt_meshcore_sf, opt_meshcore_cr);
+        return 0;
+    }
+    fprintf(stderr, "meshcore: slot added freq=%.3f MHz bw=%d kHz sf=%d cr=4/%d\n",
+            opt_meshcore_freq_hz / 1e6, opt_meshcore_bw_hz / 1000,
+            opt_meshcore_sf, opt_meshcore_cr);
+    return 1;
+}
+
 static int build_channel_set(void)
 {
+    if (opt_protocol == MESH_PROTOCOL_MESHCORE)
+        return build_channel_set_meshcore();
+
     const mesh_region_t *region = mesh_lookup_region(opt_region ? opt_region : "US");
     if (!region) {
         fprintf(stderr, "unknown region '%s'\n", opt_region ? opt_region : "(null)");
@@ -1817,6 +1876,11 @@ static void resolve_rf_defaults(void)
         return;
     }
     if (center_freq != 0.0) return;  /* adopted from VITA-49 context */
+
+    if (opt_protocol == MESH_PROTOCOL_MESHCORE) {
+        center_freq = opt_meshcore_freq_hz ? (double)opt_meshcore_freq_hz : 910000000.0;
+        return;
+    }
 
     /* Derive: place center at the midpoint of the (region, preset) coverage. */
     const mesh_region_t *r = mesh_lookup_region(opt_region ? opt_region : "US");
@@ -3333,8 +3397,8 @@ static int run_live(void)
     /* Keyset:
      *   - --keys=...       (CLI csv)
      *   - --keys-file=...  (file, one spec per line, # comments)
-     *   - default file at $XDG_CONFIG_HOME/meshtastic-sniffer/keys
-     *                  or ~/.config/meshtastic-sniffer/keys
+     *   - default file at $XDG_CONFIG_HOME/meshcore-sniffer/keys
+     *                  or ~/.config/meshcore-sniffer/keys
      *   - --share-url=URL  (meshtastic.org/e/ link parsed via web's decoder)
      *   - MESHTASTIC_KEYS env (already merged in options_parse)
      */
@@ -3348,10 +3412,10 @@ static int run_live(void)
         const char *home = getenv("HOME");
         if (xdg && *xdg)
             snprintf(default_keys_path, sizeof(default_keys_path),
-                     "%s/meshtastic-sniffer/keys", xdg);
+                     "%s/meshcore-sniffer/keys", xdg);
         else if (home && *home)
             snprintf(default_keys_path, sizeof(default_keys_path),
-                     "%s/.config/meshtastic-sniffer/keys", home);
+                     "%s/.config/meshcore-sniffer/keys", home);
         if (default_keys_path[0] && access(default_keys_path, R_OK) == 0)
             opt_keys_file = default_keys_path;
     }
@@ -3387,6 +3451,32 @@ static int run_live(void)
 
     if (verbose) keyset_print(g_keys);
 
+    /* MeshCore channels (--meshcore-channel=NAME:SECRET, repeatable).
+     * The official app's default "Public" channel is preloaded first
+     * (unless --meshcore-no-default-channel) so a bare --protocol=meshcore
+     * can already decode messages on the universal default channel, along
+     * with a handful of well-known public hashtag channels -- their
+     * secrets are derived from the name alone (see
+     * meshcore_channelset_add_hashtag()), just like the official app's
+     * "Add Channel" flow, so no key material is needed here either. */
+    g_meshcore_channels = meshcore_channelset_create();
+    if (!opt_meshcore_no_default_channel) {
+        if (meshcore_channelset_add_default_public(g_meshcore_channels, NULL, NULL) < 0)
+            fprintf(stderr, "meshcore: could not preload default 'Public' channel\n");
+        static const char *default_hashtags[] = {
+            "test", "bot", "meteo", "fr", "fr-30", "fr-34", "fr-occ",
+        };
+        for (size_t i = 0; i < sizeof(default_hashtags) / sizeof(default_hashtags[0]); ++i) {
+            if (meshcore_channelset_add_hashtag(g_meshcore_channels, default_hashtags[i], NULL, NULL) < 0)
+                fprintf(stderr, "meshcore: could not preload hashtag channel '#%s'\n",
+                        default_hashtags[i]);
+        }
+    }
+    for (int i = 0; i < opt_meshcore_channel_count; ++i) {
+        if (meshcore_channelset_add_spec(g_meshcore_channels, opt_meshcore_channel[i], NULL, NULL) < 0)
+            fprintf(stderr, "meshcore-channel: could not parse '%s'\n", opt_meshcore_channel[i]);
+    }
+
     /* If requested, preload FFTW wisdom so plan creation reuses prior
      * timing data instead of running FFTW_MEASURE from scratch. Has to
      * happen before channelizer_create / build_channel_set, both of
@@ -3410,26 +3500,46 @@ static int run_live(void)
 
     int n = build_channel_set();
     if (opt_op_mode != OP_MODE_SCAN && n <= 0) {
-        fprintf(stderr, "no channels configured (region=%s presets=%s); nothing to decode.\n",
-                opt_region, opt_preset_csv);
-        /* Common gotcha on RTL-class SDRs: --rate is not a multiple of any
-         * preset's LoRa channel bandwidth (125 / 250 / 500 kHz), so the
-         * polyphase channelizer rejects every preset slot. Surface a
-         * concrete hint with the next two integer-aligned rates the user
-         * could try, instead of leaving them to guess. */
         const uint32_t rate = (uint32_t)samp_rate;
-        const uint32_t bws[] = { 125000U, 250000U, 500000U };
-        int any_aligned = 0;
-        for (size_t i = 0; i < sizeof(bws)/sizeof(bws[0]); ++i)
-            if (rate % bws[i] == 0) { any_aligned = 1; break; }
-        if (!any_aligned) {
-            uint32_t down = (rate / 250000U) * 250000U;
-            uint32_t up   = down + 250000U;
-            fprintf(stderr,
-                "  hint: --rate=%u is not a multiple of any preset's LoRa BW\n"
-                "        (125 / 250 / 500 kHz). Try --rate=%u or --rate=%u\n"
-                "        (or omit --rate to take the backend default).\n",
-                rate, down, up);
+        if (opt_protocol == MESH_PROTOCOL_MESHCORE) {
+            fprintf(stderr, "no meshcore channel configured (freq=%.3f MHz bw=%d Hz "
+                    "sf=%d cr=4/%d); nothing to decode.\n",
+                    opt_meshcore_freq_hz / 1e6, opt_meshcore_bw_hz,
+                    opt_meshcore_sf, opt_meshcore_cr);
+            /* Same gotcha as the Meshtastic path below, but checked against
+             * the actual configured --meshcore-bw instead of the fixed
+             * 125/250/500 kHz preset set, which doesn't apply here. */
+            if (opt_meshcore_bw_hz > 0 && rate % (uint32_t)opt_meshcore_bw_hz != 0) {
+                uint32_t bw = (uint32_t)opt_meshcore_bw_hz;
+                uint32_t down = (rate / bw) * bw;
+                uint32_t up   = down + bw;
+                fprintf(stderr,
+                    "  hint: --rate=%u is not a multiple of --meshcore-bw=%u.\n"
+                    "        Try --rate=%u or --rate=%u (or omit --rate to take\n"
+                    "        the backend default).\n",
+                    rate, bw, down, up);
+            }
+        } else {
+            fprintf(stderr, "no channels configured (region=%s presets=%s); nothing to decode.\n",
+                    opt_region, opt_preset_csv);
+            /* Common gotcha on RTL-class SDRs: --rate is not a multiple of any
+             * preset's LoRa channel bandwidth (125 / 250 / 500 kHz), so the
+             * polyphase channelizer rejects every preset slot. Surface a
+             * concrete hint with the next two integer-aligned rates the user
+             * could try, instead of leaving them to guess. */
+            const uint32_t bws[] = { 125000U, 250000U, 500000U };
+            int any_aligned = 0;
+            for (size_t i = 0; i < sizeof(bws)/sizeof(bws[0]); ++i)
+                if (rate % bws[i] == 0) { any_aligned = 1; break; }
+            if (!any_aligned) {
+                uint32_t down = (rate / 250000U) * 250000U;
+                uint32_t up   = down + 250000U;
+                fprintf(stderr,
+                    "  hint: --rate=%u is not a multiple of any preset's LoRa BW\n"
+                    "        (125 / 250 / 500 kHz). Try --rate=%u or --rate=%u\n"
+                    "        (or omit --rate to take the backend default).\n",
+                    rate, down, up);
+            }
         }
         return 1;
     }
@@ -3731,6 +3841,15 @@ static int run_live(void)
     if (opt_pcap_path) pcap_out_init(opt_pcap_path, false);
     else if (opt_pcap_fifo) pcap_out_init(opt_pcap_fifo, true);
     if (opt_archive_dir) archive_init(opt_archive_dir);
+    if (opt_sqlite_db && db_sqlite_init(opt_sqlite_db)) {
+        /* Cross-restart recovery: reload the full node list (uncapped)
+         * and seed the dashboard's SSE history ring from recent DB
+         * rows, so a fresh process + a fresh browser connection isn't
+         * blank. See db_sqlite.h for exactly what each does. */
+        db_sqlite_load_nodes();
+        if (opt_web_port > 0 && opt_history_replay_hours > 0)
+            db_sqlite_replay_recent(opt_history_replay_hours);
+    }
     if (opt_geofence_file) geofence_init(opt_geofence_file);
     if (opt_psk_wordlist) {
         if (psk_dict_init(opt_psk_wordlist))
@@ -3738,6 +3857,13 @@ static int run_live(void)
                             "against undecrypted frames\n");
         else
             fprintf(stderr, "psk-dict: failed to start; check the wordlist file\n");
+    }
+    if (opt_meshcore_hashtag_wordlist && !opt_meshcore_no_hashtag_dict) {
+        if (meshcore_hashtag_dict_init(opt_meshcore_hashtag_wordlist))
+            fprintf(stderr, "meshcore-hashtag-dict: dictionary attack active "
+                            "against undecrypted GRP_TXT/GRP_DATA frames\n");
+        else
+            fprintf(stderr, "meshcore-hashtag-dict: failed to start; check the wordlist file\n");
     }
     if (opt_gpsd_endpoint) {
         if (gpsd_init(opt_gpsd_endpoint))
@@ -3763,7 +3889,7 @@ static int run_live(void)
         fflush(stdout);
     } else {
         fprintf(stderr,
-          "(no dashboard. add --web=8888 for a Leaflet map + Activity + Config tabs.)\n");
+          "(no dashboard. add --web=8888 for a Leaflet map + Channels + Config tabs.)\n");
     }
 
     if (sample_pipeline_start() != 0) {
@@ -3851,7 +3977,9 @@ static int run_live(void)
     c2_dealer_shutdown();
     pcap_out_shutdown();
     psk_dict_shutdown();
+    meshcore_hashtag_dict_shutdown();
     archive_shutdown();
+    db_sqlite_shutdown();
     geofence_shutdown();
     if (sample_pump_stats_enabled()) {
         /* Print the demod state-machine summary before tearing down decoders.
@@ -3934,6 +4062,7 @@ static int run_live(void)
         g_iq_ring = NULL;
     }
     keyset_destroy(g_keys);             g_keys = NULL;
+    meshcore_channelset_destroy(g_meshcore_channels); g_meshcore_channels = NULL;
     return 0;
 }
 
@@ -4007,7 +4136,7 @@ int main(int argc, char **argv)
     }
 
     fprintf(stderr,
-            "meshtastic-sniffer (build " __DATE__ " " __TIME__ ")\n"
+            "meshcore-sniffer (build " __DATE__ " " __TIME__ ")\n"
             "  %d regions, %d presets compiled in.\n",
             MESH_REGION_COUNT, (int)MESH_PRESET_COUNT);
 

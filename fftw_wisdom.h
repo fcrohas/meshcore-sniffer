@@ -18,8 +18,8 @@
  *
  * The feature is off by default to avoid creating cache files
  * users did not ask for. Enable via --fftw-wisdom[=PATH]:
- *   --fftw-wisdom                 use $XDG_CACHE_HOME/meshtastic-sniffer/fftw.wisdom
- *                                 (or $HOME/.cache/meshtastic-sniffer/fftw.wisdom)
+ *   --fftw-wisdom                 use $XDG_CACHE_HOME/meshcore-sniffer/fftw.wisdom
+ *                                 (or $HOME/.cache/meshcore-sniffer/fftw.wisdom)
  *   --fftw-wisdom=PATH            use the explicit file path
  *
  * load/save are no-ops when the feature is disabled (path NULL). On

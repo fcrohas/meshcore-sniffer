@@ -1,6 +1,6 @@
-# meshtastic-sniffer architecture
+# meshcore-sniffer architecture
 
-Single-binary wideband Meshtastic LoRa receiver. One SDR -> one wide IQ stream -> polyphase channelizer -> N parallel LoRa decoders -> AES-CTR + protobuf decode -> stdout / UDP / MQTT / ZMQ (optional CurveZMQ) / CoT multicast / PCAP file or fifo / daily-rotated gzipped JSONL archive / web SSE.
+Single-binary wideband Meshtastic LoRa receiver, with an additive MeshCore protocol path (`--protocol=meshcore`; see `meshcore.{c,h}`, `meshcore_packet.{c,h}`, `meshcore_decoders.{c,h}`, `feed_meshcore_json.{c,h}` -- not yet described in the pipeline diagram below, which predates that path). One SDR -> one wide IQ stream -> polyphase channelizer -> N parallel LoRa decoders -> AES-CTR + protobuf decode -> stdout / UDP / MQTT / ZMQ (optional CurveZMQ) / CoT multicast / PCAP file or fifo / daily-rotated gzipped JSONL archive / SQLite / web SSE.
 
 ## Pipeline
 
@@ -26,7 +26,9 @@ Single-binary wideband Meshtastic LoRa receiver. One SDR -> one wide IQ stream -
             |    [dechirp * conj(upchirp), N-point FFTW3f, argmax bin]
             |        |
             |        v   IDLE -> PREAMBLE_OK -> HEADER -> PAYLOAD -> DELIVER
-            |    [Gray, diagonal deinterleave, Hamming(8,4), dewhiten, CRC16]
+            |    [Gray, diagonal deinterleave, Hamming(8,4), dewhiten, CRC16,
+            |     single-bit brute-force recovery on CRC-fail (lora_crc_bruteforce_correct,
+            |     --no-crc-bruteforce to disable; recovered frames flagged crc_corrected)]
             |        |
             |        v   raw bytes (16-byte radio header + ciphertext)
             |    on_lora_frame() -> dedup ring (PFB bin-leakage filter)
@@ -49,6 +51,9 @@ Single-binary wideband Meshtastic LoRa receiver. One SDR -> one wide IQ stream -
             |        +-- libpcap (--pcap=PATH file or --pcap-fifo=PATH for
             |        |   live Wireshark via DLT_USER0)
             |        +-- Daily gzipped JSONL archive (--archive=DIR)
+            |        +-- SQLite structured persistence (--sqlite-db=PATH, one row
+            |        |   per event with typed columns + full JSON blob; requires
+            |        |   libsqlite3 at build time, no-op stub otherwise)
             |        +-- Geofence ENTRY/EXIT events (--geofence=PATH)
             |        +-- Web SSE (--web=PORT, all events tee'd to /events)
             |
@@ -87,13 +92,14 @@ Single-binary wideband Meshtastic LoRa receiver. One SDR -> one wide IQ stream -
 | cot.{c,h} | CoT XML for ATAK PLIs and POSITION packets, multicast, runtime endpoint |
 | pcap_out.{c,h} | libpcap streaming export; rotating file or named-pipe FIFO for live Wireshark, DLT_USER0 |
 | archive.{c,h} | daily-rotated gzipped JSONL archive (`meshtastic-YYYYMMDD.jsonl.gz`) for SIEM ingest |
+| db_sqlite.{c,h} | SQLite persistence sink (`--sqlite-db=PATH`), mirrors archive.c's init/publish/shutdown shape but writes structured rows (typed columns + full JSON blob) instead of JSONL; WAL mode; optional dependency, no-op stub when libsqlite3 isn't found |
 | geofence.{c,h} | INI-style polygon parser; ray-cast point-in-polygon; emits ENTRY/EXIT events |
 | announce.{c,h} | `--announce-to=URL` periodic POST of this sensor's registry entry to fusion |
 | c2.{c,h} | transport-independent C2 dispatch (`keys_add`, `share_url`, `extra_freq`, `cot_multicast`); shared between HTTP and DEALER paths |
 | c2_dealer.{c,h} | outbound ZMQ DEALER socket (`--c2-dealer=tcp://fusion:7009`) for NAT-friendly C2; heartbeats + reply matching |
 | schema.{c,h} | static JSON Schema 2020-12 definition emitted by `--schema` |
 | scanner.{c,h} | wideband FFT, off-grid energy detector with occupied-BW estimate, spectrum snapshot |
-| web.{c,h} | HTTP+SSE server, embedded Leaflet/Activity/Topology dashboard, `/api/*` endpoints with optional `--api-token` bearer auth |
+| web.{c,h} | HTTP+SSE server, embedded Leaflet/Channels/Topology/Analyzer dashboard, `/api/*` endpoints with optional `--api-token` bearer auth. Analyzer tab (renamed from Debug) shows a structured per-field decode breakdown per frame (header bits, path, CRC status incl. brute-force-corrected provenance) and a "Show path" action that draws a MeshCore message's relay path on the Live map by matching path-hop-hash bytes against known nodes' pubkey-derived ids |
 | gpsd.{c,h} | gpsd client tagging events with station_lat/station_lon/station_alt_m |
 | sigmf.{c,h} | `.sigmf-meta` reader for --file auto-config |
 | file_src.{c,h} | CI8/CI16/CF32 IQ replay |
@@ -133,7 +139,7 @@ Sweeping a CW tone across every grid slot in each US bandwidth group (`--selftes
 | best    | 134.63 | 125 kHz, source slot 141, leak slot 56 |
 | mean    | 92.66  | — |
 
-Reproduce: `./meshtastic-sniffer --selftest-rejection` (override `--region=` / `--rate=` / `--center=` to characterize a different grid). CSV written to `/tmp/meshtastic-pfb-rejection-<timestamp>.csv` with columns `rate_hz,bw_hz,source_ch,leak_ch,target_dbfs,leak_dbfs,acr_db,n_samples`.
+Reproduce: `./meshcore-sniffer --selftest-rejection` (override `--region=` / `--rate=` / `--center=` to characterize a different grid). CSV written to `/tmp/meshtastic-pfb-rejection-<timestamp>.csv` with columns `rate_hz,bw_hz,source_ch,leak_ch,target_dbfs,leak_dbfs,acr_db,n_samples`.
 
 The 49.94 dB worst-case is the system's actual adjacent-channel floor — measured end-to-end through the cs8 ingest path, polyphase FIR, FFT, and bin dispatch — not an asymptotic window property. Real-world leakage will additionally include SDR front-end and quantization contributions outside the channelizer.
 
@@ -300,12 +306,12 @@ Known runtime concerns deliberately not blocked-on:
 
 ## Self-test entry points
 
-`./meshtastic-sniffer --selftest` runs two synthesized smoke checks (channelizer + AES end-to-end). `bash tests/test_smoke.sh` adds SigMF auto-config, `--list`, web `/api/*` round-trip, STATS SSE heartbeat, and stats heartbeat. Both run clean under sanitizers (`-fsanitize=address,undefined`).
+`./meshcore-sniffer --selftest` runs two synthesized smoke checks (channelizer + AES end-to-end). `bash tests/test_smoke.sh` adds SigMF auto-config, `--list`, web `/api/*` round-trip, STATS SSE heartbeat, and stats heartbeat. Both run clean under sanitizers (`-fsanitize=address,undefined`).
 
 ## Sensitivity benchmark + open soft-decode question
 
 `tests/sensitivity.py` synthesizes Meshtastic-shape LoRa frames (via `tests/sensitivity_synth.py` driving gr-lora_sdr's `lora_tx`), adds AWGN at a target SNR, and runs three decoders on the same `.cs8`:
-- our `meshtastic-sniffer --extra-freq=…`
+- our `meshcore-sniffer --extra-freq=…`
 - gr-lora_sdr (`tools/gr_lora_usrp_rx.py`)
 - dxlaprs `lorarx` (set `LORARX_BIN`, GPL-2.0+, built externally)
 

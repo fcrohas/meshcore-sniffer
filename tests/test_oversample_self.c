@@ -1,5 +1,5 @@
 /*
- * meshtastic-sniffer: oversample self-test.
+ * meshcore-sniffer: oversample self-test.
  *
  * Reads a cs8 IQ capture, digitally tunes to one channel center, low-
  * passes to BW, decimates to (os_factor * BW), and feeds the result to

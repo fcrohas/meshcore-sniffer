@@ -4,7 +4,7 @@
 Drives gr-lora_sdr's lora_tx hier-block to produce CRC-bearing LoRa frames,
 adds AWGN at a configurable SNR, and writes the result as a .cs8 file at
 the channel sample rate (bw * os_factor). The output file plays as one
-slot's worth of IQ -- meshtastic-sniffer --file=PATH --rate=channel_rate
+slot's worth of IQ -- meshcore-sniffer --file=PATH --rate=channel_rate
 or gr_lora_usrp_rx.py --source=file --in=PATH consume it directly.
 
 Used by tests/sensitivity.py as the synthesis step in the sensitivity

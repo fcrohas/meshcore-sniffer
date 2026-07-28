@@ -1,5 +1,5 @@
 /*
- * meshtastic-sniffer: per-stage unit tests for the LoRa decoder.
+ * meshcore-sniffer: per-stage unit tests for the LoRa decoder.
  *
  * Reads ground-truth fixtures captured by tools/lora_stage_dump.py,
  * runs each stage of our decode-side ports against them, and verifies

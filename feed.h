@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: JSON output sink.
+ * meshcore-sniffer: JSON output sink.
  *
  * Serialises decoded packets to newline-delimited JSON. Writes to:
  *   - stdout (always, when feed_init is called)

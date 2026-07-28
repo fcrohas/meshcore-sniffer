@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.9)
-project(meshtastic-sniffer C)
+project(meshcore-sniffer C)
 
 set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/Modules" ${CMAKE_MODULE_PATH})
 
@@ -98,6 +98,13 @@ if(MOSQUITTO_LIB AND MOSQUITTO_INC)
     set(MOSQUITTO_FOUND TRUE)
 endif()
 
+# Optional SQLite3 persistence sink (--sqlite-db=PATH)
+find_library(SQLITE3_LIB sqlite3)
+find_path(SQLITE3_INC sqlite3.h)
+if(SQLITE3_LIB AND SQLITE3_INC)
+    set(SQLITE3_FOUND TRUE)
+endif()
+
 # Optional ZMQ
 find_library(ZMQ_LIB zmq)
 find_path(ZMQ_INC zmq.h)
@@ -110,11 +117,29 @@ endif()
 # channelizer / demod / decoder / outputs land in subsequent phases.
 include_directories(${PROJECT_SOURCE_DIR})
 
+# Bundled default wordlist for MeshCore hashtag-channel dictionary
+# attacks (meshcore_hashtag_dict.c / recover/meshcore-recover.c). MIT
+# licensed (Taknok/French-Wordlist, see recover/wordlists/); vendored
+# in-tree rather than fetched at build time so the default works
+# offline. Path is absolute to the source tree -- see recover/wordlists/
+# README for why this only resolves when running from a checkout
+# (no install-time deployment of the data file yet).
+set(MC_DEFAULT_HASHTAG_WORDLIST "${PROJECT_SOURCE_DIR}/recover/wordlists/french.txt")
+
+# Small hand-curated set of extra candidate names (generic/thematic
+# guesses gathered while debugging real captures), always loaded in
+# addition to MC_DEFAULT_HASHTAG_WORDLIST above -- see
+# recover/wordlists/meshcore-extras.txt.
+set(MC_DEFAULT_HASHTAG_EXTRAS "${PROJECT_SOURCE_DIR}/recover/wordlists/meshcore-extras.txt")
+
 set(SOURCES
     ${PROJECT_SOURCE_DIR}/main.c
     ${PROJECT_SOURCE_DIR}/dedup.c
     ${PROJECT_SOURCE_DIR}/options.c
     ${PROJECT_SOURCE_DIR}/meshtastic.c
+    ${PROJECT_SOURCE_DIR}/meshcore.c
+    ${PROJECT_SOURCE_DIR}/meshcore_packet.c
+    ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
     ${PROJECT_SOURCE_DIR}/file_src.c
     ${PROJECT_SOURCE_DIR}/vita49.c
     ${PROJECT_SOURCE_DIR}/channelizer.c
@@ -129,15 +154,19 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/protobuf.c
     ${PROJECT_SOURCE_DIR}/mesh_packet.c
     ${PROJECT_SOURCE_DIR}/mesh_decoders.c
+    ${PROJECT_SOURCE_DIR}/jw.c
+    ${PROJECT_SOURCE_DIR}/feed_meshcore_json.c
     ${PROJECT_SOURCE_DIR}/feed.c
     ${PROJECT_SOURCE_DIR}/announce.c
     ${PROJECT_SOURCE_DIR}/gpsd.c
     ${PROJECT_SOURCE_DIR}/archive.c
+    ${PROJECT_SOURCE_DIR}/db_sqlite.c
     ${PROJECT_SOURCE_DIR}/c2.c
     ${PROJECT_SOURCE_DIR}/c2_dealer.c
     ${PROJECT_SOURCE_DIR}/geofence.c
     ${PROJECT_SOURCE_DIR}/pcap_out.c
     ${PROJECT_SOURCE_DIR}/psk_dict.c
+    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c
     ${PROJECT_SOURCE_DIR}/schema.c
     ${PROJECT_SOURCE_DIR}/scanner.c
     ${PROJECT_SOURCE_DIR}/web.c
@@ -165,9 +194,12 @@ else()
     message(STATUS "SIMD: scalar only (unrecognised platform)")
 endif()
 
-add_executable(meshtastic-sniffer ${SOURCES})
+add_executable(meshcore-sniffer ${SOURCES})
+target_compile_definitions(meshcore-sniffer PRIVATE
+    MC_DEFAULT_HASHTAG_WORDLIST="${MC_DEFAULT_HASHTAG_WORDLIST}"
+    MC_DEFAULT_HASHTAG_EXTRAS="${MC_DEFAULT_HASHTAG_EXTRAS}")
 
-target_link_libraries(meshtastic-sniffer PRIVATE
+target_link_libraries(meshcore-sniffer PRIVATE
     Threads::Threads
     ${FFTW3F_LIB}
     ${OPENSSL_CRYPTO_LIBRARY}
@@ -175,14 +207,14 @@ target_link_libraries(meshtastic-sniffer PRIVATE
     m)
 
 if(FFTW3F_THREADS_LIB)
-    target_link_libraries(meshtastic-sniffer PRIVATE ${FFTW3F_THREADS_LIB})
+    target_link_libraries(meshcore-sniffer PRIVATE ${FFTW3F_THREADS_LIB})
 endif()
 
 # OpenMP parallelizes the per-band loop in the channelizer batch path.
 # Optional: builds without it just degrade to single-thread.
 find_package(OpenMP)
 if(OpenMP_C_FOUND)
-    target_link_libraries(meshtastic-sniffer PRIVATE OpenMP::OpenMP_C)
+    target_link_libraries(meshcore-sniffer PRIVATE OpenMP::OpenMP_C)
     message(STATUS "OpenMP enabled for parallel channelizer (-fopenmp)")
 endif()
 
@@ -202,29 +234,29 @@ foreach(_pair  SOAPYSDR:HAVE_SOAPYSDR:soapysdr.c
         message(STATUS "${_name}: enabled")
         # Source files for backends are added once they exist on disk.
         if(EXISTS "${PROJECT_SOURCE_DIR}/${_src}")
-            target_sources(meshtastic-sniffer PRIVATE ${PROJECT_SOURCE_DIR}/${_src})
-            target_compile_definitions(meshtastic-sniffer PRIVATE ${_def})
+            target_sources(meshcore-sniffer PRIVATE ${PROJECT_SOURCE_DIR}/${_src})
+            target_compile_definitions(meshcore-sniffer PRIVATE ${_def})
             if(_name STREQUAL "SOAPYSDR")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${SOAPYSDR_LIBRARIES})
-                target_include_directories(meshtastic-sniffer PRIVATE ${SOAPYSDR_INCLUDE_DIR})
+                target_link_libraries(meshcore-sniffer PRIVATE ${SOAPYSDR_LIBRARIES})
+                target_include_directories(meshcore-sniffer PRIVATE ${SOAPYSDR_INCLUDE_DIR})
             elseif(_name STREQUAL "SDRPLAY")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${SDRPLAY_LIBRARIES})
-                target_include_directories(meshtastic-sniffer PRIVATE ${SDRPLAY_INCLUDE_DIR})
+                target_link_libraries(meshcore-sniffer PRIVATE ${SDRPLAY_LIBRARIES})
+                target_include_directories(meshcore-sniffer PRIVATE ${SDRPLAY_INCLUDE_DIR})
             elseif(_name STREQUAL "RTLSDR")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${RTLSDR_LIBRARIES})
-                target_include_directories(meshtastic-sniffer PRIVATE ${RTLSDR_INCLUDE_DIR})
+                target_link_libraries(meshcore-sniffer PRIVATE ${RTLSDR_LIBRARIES})
+                target_include_directories(meshcore-sniffer PRIVATE ${RTLSDR_INCLUDE_DIR})
             elseif(_name STREQUAL "HACKRF")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${HACKRF_LIB})
-                target_include_directories(meshtastic-sniffer PRIVATE ${HACKRF_INC})
+                target_link_libraries(meshcore-sniffer PRIVATE ${HACKRF_LIB})
+                target_include_directories(meshcore-sniffer PRIVATE ${HACKRF_INC})
             elseif(_name STREQUAL "BLADERF")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${BLADERF_LIB})
-                target_include_directories(meshtastic-sniffer PRIVATE ${BLADERF_INC})
+                target_link_libraries(meshcore-sniffer PRIVATE ${BLADERF_LIB})
+                target_include_directories(meshcore-sniffer PRIVATE ${BLADERF_INC})
             elseif(_name STREQUAL "UHD")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${UHD_LIB})
-                target_include_directories(meshtastic-sniffer PRIVATE ${UHD_INC})
+                target_link_libraries(meshcore-sniffer PRIVATE ${UHD_LIB})
+                target_include_directories(meshcore-sniffer PRIVATE ${UHD_INC})
             elseif(_name STREQUAL "AIRSPY")
-                target_link_libraries(meshtastic-sniffer PRIVATE ${AIRSPY_LIB})
-                target_include_directories(meshtastic-sniffer PRIVATE ${AIRSPY_INC})
+                target_link_libraries(meshcore-sniffer PRIVATE ${AIRSPY_LIB})
+                target_include_directories(meshcore-sniffer PRIVATE ${AIRSPY_INC})
             endif()
         else()
             message(STATUS "  (${_src} not yet present, will be linked when added)")
@@ -234,21 +266,30 @@ foreach(_pair  SOAPYSDR:HAVE_SOAPYSDR:soapysdr.c
     endif()
 endforeach()
 
-target_sources(meshtastic-sniffer PRIVATE ${PROJECT_SOURCE_DIR}/mqtt.c)
+target_sources(meshcore-sniffer PRIVATE ${PROJECT_SOURCE_DIR}/mqtt.c)
 if(MOSQUITTO_FOUND)
-    target_link_libraries(meshtastic-sniffer PRIVATE ${MOSQUITTO_LIB})
-    target_include_directories(meshtastic-sniffer PRIVATE ${MOSQUITTO_INC})
-    target_compile_definitions(meshtastic-sniffer PRIVATE HAVE_MQTT)
+    target_link_libraries(meshcore-sniffer PRIVATE ${MOSQUITTO_LIB})
+    target_include_directories(meshcore-sniffer PRIVATE ${MOSQUITTO_INC})
+    target_compile_definitions(meshcore-sniffer PRIVATE HAVE_MQTT)
     message(STATUS "MQTT: enabled")
 else()
     message(STATUS "MQTT: not found (mqtt.c stubs out; --mqtt will be a no-op)")
 endif()
 
-target_sources(meshtastic-sniffer PRIVATE ${PROJECT_SOURCE_DIR}/zmq_pub.c)
+if(SQLITE3_FOUND)
+    target_link_libraries(meshcore-sniffer PRIVATE ${SQLITE3_LIB})
+    target_include_directories(meshcore-sniffer PRIVATE ${SQLITE3_INC})
+    target_compile_definitions(meshcore-sniffer PRIVATE HAVE_SQLITE3)
+    message(STATUS "SQLite3: enabled")
+else()
+    message(STATUS "SQLite3: not found (db_sqlite.c stubs out; --sqlite-db will be a no-op)")
+endif()
+
+target_sources(meshcore-sniffer PRIVATE ${PROJECT_SOURCE_DIR}/zmq_pub.c)
 if(ZMQ_FOUND)
-    target_link_libraries(meshtastic-sniffer PRIVATE ${ZMQ_LIB})
-    target_include_directories(meshtastic-sniffer PRIVATE ${ZMQ_INC})
-    target_compile_definitions(meshtastic-sniffer PRIVATE HAVE_ZMQ)
+    target_link_libraries(meshcore-sniffer PRIVATE ${ZMQ_LIB})
+    target_include_directories(meshcore-sniffer PRIVATE ${ZMQ_INC})
+    target_compile_definitions(meshcore-sniffer PRIVATE HAVE_ZMQ)
     message(STATUS "ZMQ: enabled")
 else()
     message(STATUS "ZMQ: not found (zmq_pub.c stubs out; --zmq will be a no-op)")
@@ -258,13 +299,13 @@ endif()
 # libcurl is standard on every distro we target and the existing
 # package landscape (apt install libcurl4-gnutls-dev or -openssl-dev).
 find_package(CURL REQUIRED)
-target_link_libraries(meshtastic-sniffer PRIVATE CURL::libcurl)
+target_link_libraries(meshcore-sniffer PRIVATE CURL::libcurl)
 message(STATUS "CURL: enabled for webhooks (${CURL_VERSION_STRING})")
 
-set_property(TARGET meshtastic-sniffer PROPERTY C_STANDARD 99)
-set_property(TARGET meshtastic-sniffer PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+set_property(TARGET meshcore-sniffer PROPERTY C_STANDARD 99)
+set_property(TARGET meshcore-sniffer PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 
-install(TARGETS meshtastic-sniffer DESTINATION bin)
+install(TARGETS meshcore-sniffer DESTINATION bin)
 
 # meshtastic-recover: offline PSK recovery from a captured pcap.
 # Reuses keyset / mesh_packet / meshtastic / protobuf from the parent.
@@ -285,6 +326,25 @@ endif()
 set_property(TARGET meshtastic-recover PROPERTY C_STANDARD 99)
 install(TARGETS meshtastic-recover DESTINATION bin)
 
+# meshcore-recover: offline hashtag-channel name recovery for a single
+# captured MeshCore GRP_TXT/GRP_DATA frame. Reuses meshcore.c's own
+# hashtag-secret derivation + meshcore_decoders.c's verify/decrypt, so
+# it can never drift from what a real node accepts.
+add_executable(meshcore-recover
+    ${PROJECT_SOURCE_DIR}/recover/meshcore-recover.c
+    ${PROJECT_SOURCE_DIR}/meshcore.c
+    ${PROJECT_SOURCE_DIR}/meshcore_packet.c
+    ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict_stub.c)
+target_link_libraries(meshcore-recover PRIVATE
+    Threads::Threads
+    ${OPENSSL_CRYPTO_LIBRARY})
+target_compile_definitions(meshcore-recover PRIVATE
+    MC_DEFAULT_HASHTAG_WORDLIST="${MC_DEFAULT_HASHTAG_WORDLIST}"
+    MC_DEFAULT_HASHTAG_EXTRAS="${MC_DEFAULT_HASHTAG_EXTRAS}")
+set_property(TARGET meshcore-recover PROPERTY C_STANDARD 99)
+install(TARGETS meshcore-recover DESTINATION bin)
+
 # test_oversample_self: diagnostic-only standalone harness that bypasses
 # the polyphase channelizer, DDCs one slot at os_factor * BW, and feeds
 # the result to lora_decoder_create_os() at the same os_factor. Used to
@@ -298,6 +358,19 @@ target_link_libraries(test_oversample_self PRIVATE
     ${FFTW3F_LIB}
     m)
 set_property(TARGET test_oversample_self PROPERTY C_STANDARD 99)
+
+# test_crc_bruteforce: regression test for lora_crc_bruteforce_correct()
+# (single-bit CRC16 recovery on CRC-fail LoRa frames). Pure logic test
+# against constructed byte vectors, but links lora.c whole (like
+# test_oversample_self above) since the function lives in that file.
+add_executable(test_crc_bruteforce
+    ${PROJECT_SOURCE_DIR}/tests/test_crc_bruteforce.c
+    ${PROJECT_SOURCE_DIR}/lora.c)
+target_link_libraries(test_crc_bruteforce PRIVATE
+    Threads::Threads
+    ${FFTW3F_LIB}
+    m)
+set_property(TARGET test_crc_bruteforce PROPERTY C_STANDARD 99)
 
 # test_pfb_bin_power: feed a wideband cs8 file through the same
 # channelizer the live pipeline uses, dump per-bin RMS power in
@@ -348,6 +421,75 @@ add_executable(test_mesh_decoders
 target_link_libraries(test_mesh_decoders PRIVATE m)
 set_property(TARGET test_mesh_decoders PROPERTY C_STANDARD 99)
 
+# test_meshcore: smoke test for the MeshCore protocol path -- ADVERT
+# parsing (in the clear) and GRP_TXT AES-128-ECB+HMAC verify/decrypt.
+add_executable(test_meshcore
+    ${PROJECT_SOURCE_DIR}/tests/test_meshcore.c
+    ${PROJECT_SOURCE_DIR}/meshcore.c
+    ${PROJECT_SOURCE_DIR}/meshcore_packet.c
+    ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict_stub.c)
+target_link_libraries(test_meshcore PRIVATE
+    Threads::Threads
+    ${OPENSSL_CRYPTO_LIBRARY})
+set_property(TARGET test_meshcore PROPERTY C_STANDARD 99)
+
+# test_meshcore_hashtag_dict: regression test for the background
+# hashtag-channel dictionary attack (meshcore_hashtag_dict.c) -- links
+# the real module (not the stub), so it supplies its own
+# app_get_meshcore_channels()/web_publish_line()/webhook_publish() the
+# way the main sniffer binary normally would.
+add_executable(test_meshcore_hashtag_dict
+    ${PROJECT_SOURCE_DIR}/tests/test_meshcore_hashtag_dict.c
+    ${PROJECT_SOURCE_DIR}/meshcore.c
+    ${PROJECT_SOURCE_DIR}/meshcore_packet.c
+    ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c)
+target_link_libraries(test_meshcore_hashtag_dict PRIVATE
+    Threads::Threads
+    ${OPENSSL_CRYPTO_LIBRARY})
+set_property(TARGET test_meshcore_hashtag_dict PROPERTY C_STANDARD 99)
+
+# test_feed_meshcore: regression test for the MeshCore JSON
+# serializer (feed_meshcore_json.c, split out of feed.c precisely so
+# it's linkable/testable without mqtt/zmq/cot/gpsd/geofence/options).
+# Covers: GRP_TXT "text" field visibility, and the generic "from" /
+# node_db wiring that the web dashboard's JS requires (`if (!p.from)
+# return;`) for MeshCore ADVERT/GRP_TXT events to show up at all.
+add_executable(test_feed_meshcore
+    ${PROJECT_SOURCE_DIR}/tests/test_feed_meshcore.c
+    ${PROJECT_SOURCE_DIR}/jw.c
+    ${PROJECT_SOURCE_DIR}/feed_meshcore_json.c
+    ${PROJECT_SOURCE_DIR}/node_db.c
+    ${PROJECT_SOURCE_DIR}/node_db_persist_stub.c
+    ${PROJECT_SOURCE_DIR}/meshcore.c
+    ${PROJECT_SOURCE_DIR}/meshcore_packet.c
+    ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict_stub.c)
+target_link_libraries(test_feed_meshcore PRIVATE
+    Threads::Threads
+    ${OPENSSL_CRYPTO_LIBRARY})
+set_property(TARGET test_feed_meshcore PROPERTY C_STANDARD 99)
+
+# test_db_sqlite: regression test for db_sqlite.c (the SQLite
+# persistence sink). Only built when libsqlite3 was found -- without
+# it db_sqlite.c compiles to a no-op stub and there's nothing to
+# verify against a real DB file.
+if(SQLITE3_FOUND)
+    add_executable(test_db_sqlite
+        ${PROJECT_SOURCE_DIR}/tests/test_db_sqlite.c
+        ${PROJECT_SOURCE_DIR}/db_sqlite.c
+        ${PROJECT_SOURCE_DIR}/node_db.c
+        ${PROJECT_SOURCE_DIR}/meshtastic.c
+        ${PROJECT_SOURCE_DIR}/protobuf.c)
+    target_link_libraries(test_db_sqlite PRIVATE
+        Threads::Threads
+        ${SQLITE3_LIB})
+    target_include_directories(test_db_sqlite PRIVATE ${SQLITE3_INC})
+    target_compile_definitions(test_db_sqlite PRIVATE HAVE_SQLITE3)
+    set_property(TARGET test_db_sqlite PROPERTY C_STANDARD 99)
+endif()
+
 # focused_demo: scan-then-focus Phase 2 prototype. One shared file reader
 # streams cs8 IQ into N independent focused-decode workers, each with its
 # own DDC chain (mixer + LPF + decim) and lora_decoder_t. Bypasses the
@@ -362,7 +504,7 @@ target_link_libraries(focused_demo PRIVATE
 set_property(TARGET focused_demo PROPERTY C_STANDARD 99)
 
 # CPack
-set(CPACK_PACKAGE_NAME "meshtastic-sniffer")
+set(CPACK_PACKAGE_NAME "meshcore-sniffer")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Wideband Meshtastic LoRa receiver")
 set(CPACK_PACKAGE_VENDOR "CEMAXECUTER LLC")
 set(CPACK_PACKAGE_VERSION_MAJOR "0")

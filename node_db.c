@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: in-memory node-info cache.
+ * meshcore-sniffer: in-memory node-info cache.
  *
  */
 
@@ -46,6 +46,8 @@ void node_db_remember(uint32_t id, const char *long_name,
     if (hw_model) n->hw_model = hw_model;
     if (role)     n->role     = role;
     pthread_mutex_unlock(&g_lock);
+
+    node_db_persist_hook(id, long_name, short_name, hw_model, role);
 }
 
 bool node_db_lookup(uint32_t id, node_record_t *out)

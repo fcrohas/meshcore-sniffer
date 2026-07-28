@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: off-grid LoRa discovery.
+ * meshcore-sniffer: off-grid LoRa discovery.
  *
  * Watches the full SDR passband for energy outside the configured
  * channel grid. v1 is an energy detector: periodic wideband FFT,

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: geofence alerts.
+ * meshcore-sniffer: geofence alerts.
  *
  * When --geofence=PATH is set, polygons are loaded from a simple
  * INI-style file:

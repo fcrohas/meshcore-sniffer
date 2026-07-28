@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: gpsd client.
+ * meshcore-sniffer: gpsd client.
  *
  * Background thread connects to gpsd over TCP, sends ?WATCH to enable
  * JSON-mode reports, then reads newline-delimited JSON and parses each

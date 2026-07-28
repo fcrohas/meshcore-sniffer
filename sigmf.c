@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: SigMF metadata reader.
+ * meshcore-sniffer: SigMF metadata reader.
  *
  * Hand-rolled JSON-ish key/value extractor -- we only care about three
  * fields and don't want to drag in a JSON parser. Tolerant of

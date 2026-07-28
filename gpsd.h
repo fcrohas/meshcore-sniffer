@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: gpsd client.
+ * meshcore-sniffer: gpsd client.
  *
  * Connects to gpsd over TCP (default localhost:2947), subscribes to
  * JSON-mode TPV reports, exposes the latest 2D/3D fix via a thread-

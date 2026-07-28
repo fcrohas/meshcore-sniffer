@@ -8,7 +8,7 @@
  * implementation here is original; only the on-the-air constants come
  * from the firmware.
  *
- * meshtastic-sniffer: packet decoder.
+ * meshcore-sniffer: packet decoder.
  *
  * Wire format of a Meshtastic LoRa frame (after CSS demod and CRC pass):
  *
@@ -43,6 +43,20 @@ static uint32_t rd_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Render up to (max-1)/2 bytes of [p, p+n) as lowercase hex into out,
+ * NUL terminated. Feeds mesh_event_t::raw_hex for the web dashboard's
+ * Debug tab. */
+static void hex_dump(const uint8_t *p, size_t n, char *out, size_t max)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t o = 0;
+    for (size_t i = 0; i < n && o + 2 < max; ++i) {
+        out[o++] = digits[(p[i] >> 4) & 0xF];
+        out[o++] = digits[p[i] & 0xF];
+    }
+    out[o] = 0;
 }
 
 static void parse_header(const uint8_t *frame, mesh_event_t *ev)
@@ -203,6 +217,7 @@ int mesh_packet_decode_with_radio(const uint8_t *frame, size_t frame_len,
     ev.cr      = cr;
     ev.bw_hz   = bw_hz;
     ev.slot_id = -1; /* main.c's on_mesh_event fills this from the user pointer */
+    hex_dump(frame, frame_len > 256 ? 256 : frame_len, ev.raw_hex, sizeof(ev.raw_hex));
     /* Resolve preset name from (sf, cr, bw_hz) by exact match against the
      * canonical Meshtastic preset table. Both narrow (sub-GHz) and wide
      * (LORA_24) bandwidth columns are checked. */

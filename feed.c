@@ -2,15 +2,18 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: JSON output sink.
+ * meshcore-sniffer: JSON output sink.
  *
  */
 
 #include "cot.h"
 #include "archive.h"
+#include "db_sqlite.h"
 #include "feed.h"
+#include "feed_meshcore_json.h"
 #include "geofence.h"
 #include "gpsd.h"
+#include "jw.h"
 #include "mesh_decoders.h"
 #include "meshtastic.h"
 #include "node_db.h"
@@ -49,93 +52,17 @@ typedef struct {
 static udp_feed_t g_udp_feeds[MAX_UDP_FEEDS];
 static int        g_udp_feed_count = 0;
 
-/* ---- JSON writer (simple direct sprintf, not a full lib) ---- */
-
-typedef struct {
-    char  *buf;
-    size_t cap;
-    size_t len;
-    bool   first_field;
-} jw_t;
-
-static void jw_init(jw_t *j, char *buf, size_t cap) {
-    j->buf = buf; j->cap = cap; j->len = 0; j->first_field = true;
-}
-static void jw_putc(jw_t *j, char c) {
-    if (j->len + 1 < j->cap) j->buf[j->len++] = c;
-}
-static void jw_puts(jw_t *j, const char *s) {
-    while (*s && j->len + 1 < j->cap) j->buf[j->len++] = *s++;
-}
-static void jw_printf(jw_t *j, const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    int n = vsnprintf(j->buf + j->len, j->cap - j->len, fmt, ap);
-    va_end(ap);
-    if (n > 0 && (size_t)n < j->cap - j->len) j->len += (size_t)n;
-}
-static void jw_str_escaped(jw_t *j, const char *s) {
-    jw_putc(j, '"');
-    for (; *s; ++s) {
-        unsigned char c = (unsigned char)*s;
-        if (c == '"' || c == '\\') { jw_putc(j, '\\'); jw_putc(j, (char)c); }
-        else if (c == '\n')        { jw_puts(j, "\\n"); }
-        else if (c == '\r')        { jw_puts(j, "\\r"); }
-        else if (c == '\t')        { jw_puts(j, "\\t"); }
-        else if (c < 0x20)         { jw_printf(j, "\\u%04x", c); }
-        else                       { jw_putc(j, (char)c); }
-    }
-    jw_putc(j, '"');
-}
-static void jw_field_name(jw_t *j, const char *name) {
-    if (!j->first_field) jw_putc(j, ',');
-    j->first_field = false;
-    jw_str_escaped(j, name);
-    jw_putc(j, ':');
-}
-static void jw_field_str(jw_t *j, const char *name, const char *value) {
-    if (!value) return;
-    jw_field_name(j, name);
-    jw_str_escaped(j, value);
-}
-static void jw_field_u32(jw_t *j, const char *name, uint32_t value) {
-    jw_field_name(j, name);
-    jw_printf(j, "%u", value);
-}
-static void jw_field_u64(jw_t *j, const char *name, uint64_t value) {
-    jw_field_name(j, name);
-    jw_printf(j, "%llu", (unsigned long long)value);
-}
-static void jw_field_i32(jw_t *j, const char *name, int32_t value) {
-    jw_field_name(j, name);
-    jw_printf(j, "%d", value);
-}
-static void jw_field_f32(jw_t *j, const char *name, float value) {
-    jw_field_name(j, name);
-    jw_printf(j, "%.4f", (double)value);
-}
-static void jw_field_f64(jw_t *j, const char *name, double value) {
-    jw_field_name(j, name);
-    jw_printf(j, "%.7f", value);
-}
-static void jw_field_bool(jw_t *j, const char *name, bool value) {
-    jw_field_name(j, name);
-    jw_puts(j, value ? "true" : "false");
-}
-static void jw_open(jw_t *j) { jw_putc(j, '{'); j->first_field = true; }
-static void jw_close(jw_t *j) { jw_putc(j, '}'); j->first_field = false; }
-static void jw_open_array(jw_t *j, const char *name) {
-    jw_field_name(j, name); jw_putc(j, '['); j->first_field = true;
-}
-static void jw_close_array(jw_t *j) { jw_putc(j, ']'); j->first_field = false; }
-static void jw_array_sep(jw_t *j) {
-    if (!j->first_field) jw_putc(j, ',');
-    j->first_field = false;
-}
+/* ---- JSON writer: jw.h/jw.c (shared with feed_meshcore_json.c) ---- */
 
 /* ---- JSON serializer for mesh_event_t ---- */
 
 static void serialize_event(jw_t *j, const mesh_event_t *ev)
 {
+    if (ev->is_meshcore) {
+        feed_serialize_event_meshcore(j, ev, opt_station_id);
+        return;
+    }
+
     jw_open(j);
 
     /* Top-level metadata */
@@ -187,6 +114,11 @@ static void serialize_event(jw_t *j, const mesh_event_t *ev)
      * |cfo| > 100 Hz so well-tuned radios don't spam noise. */
     if (ev->has_crc)
         jw_field_bool(j, "payload_crc_ok", ev->payload_crc_ok);
+    /* Only meaningful alongside payload_crc_ok==true: distinguishes a
+     * frame recovered via lora_crc_bruteforce_correct()'s single-bit
+     * search from a clean first-pass CRC match. */
+    if (ev->has_crc && ev->payload_crc_ok && ev->crc_corrected)
+        jw_field_bool(j, "crc_corrected", true);
     /* fields_trusted is the honest answer to "should a consumer treat
      * the decoded from/to/packet_id/etc. as factual?" It is true only
      * when we have positive evidence the bytes were received intact:
@@ -205,6 +137,7 @@ static void serialize_event(jw_t *j, const mesh_event_t *ev)
     bool fields_trusted = (ev->has_crc && ev->payload_crc_ok)
                        || (!ev->has_crc && ev->decrypted);
     jw_field_bool(j, "fields_trusted", fields_trusted);
+    if (ev->raw_hex[0]) jw_field_str(j, "raw_hex", ev->raw_hex);
     if (ev->cfo_hz > 100.0f || ev->cfo_hz < -100.0f)
         jw_field_f32(j, "cfo_hz", ev->cfo_hz);
     /* Multilateration timestamp + accuracy class. Only emit when we
@@ -793,4 +726,5 @@ void feed_publish_event(const mesh_event_t *ev)
     zmq_pub_publish(buf, j.len);
     web_publish_line(buf, j.len);
     archive_publish(buf, j.len);
+    db_sqlite_publish(ev, buf, j.len);
 }

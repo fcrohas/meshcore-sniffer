@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: per-channel decimating DDC.
+ * meshcore-sniffer: per-channel decimating DDC.
  *
  * Takes a single wideband IQ stream from the SDR and feeds N
  * narrowband baseband streams to the LoRa demod -- one per

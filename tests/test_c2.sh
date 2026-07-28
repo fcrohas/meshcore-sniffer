@@ -1,5 +1,5 @@
 #!/bin/bash
-# meshtastic-sniffer + meshtastic-fusion C2 smoke test.
+# meshcore-sniffer + meshtastic-fusion C2 smoke test.
 #
 # Spins up a fusion aggregator and a sniffer that talks to it via two
 # separate channels:
@@ -20,7 +20,7 @@ FUSION_PORT=${FUSION_PORT:-8952}
 ROUTER_PORT=${ROUTER_PORT:-8953}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-SNIFFER_BIN="${SNIFFER_BIN:-$HERE/build/meshtastic-sniffer}"
+SNIFFER_BIN="${SNIFFER_BIN:-$HERE/build/meshcore-sniffer}"
 FUSION_BIN="${FUSION_BIN:-$HERE/fusion/meshtastic-fusion}"
 
 if [[ ! -x "$SNIFFER_BIN" ]]; then

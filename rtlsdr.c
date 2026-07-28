@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * RTL-SDR native backend for meshtastic-sniffer
+ * RTL-SDR native backend for meshcore-sniffer
  *
  */
 

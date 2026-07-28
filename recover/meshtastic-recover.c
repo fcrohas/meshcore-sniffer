@@ -4,7 +4,7 @@
  *
  * meshtastic-recover: offline PSK recovery for Meshtastic captures.
  *
- * Reads a libpcap file produced by `meshtastic-sniffer --pcap=PATH`
+ * Reads a libpcap file produced by `meshcore-sniffer --pcap=PATH`
  * (DLT_USER0, raw on-air frames: 16-byte cleartext header + AES-CTR
  * ciphertext) and a wordlist of candidate keys, and prints any keys
  * that successfully decrypt one or more captured frames.
@@ -22,7 +22,7 @@
  * Output is a `--keys-file=` compatible file: one
  *   name=base64:<psk-bytes>
  * line per recovered (name, psk) pair, ready to feed back to
- * meshtastic-sniffer --keys-file=.
+ * meshcore-sniffer --keys-file=.
  *
  * Why this exists: defenders auditing their own channel keys against
  * a wordlist; recovery of lost meshtastic.org/e/ URLs from a captured
@@ -59,7 +59,7 @@ static pthread_mutex_t g_hits_mu = PTHREAD_MUTEX_INITIALIZER;
 /* ---- libpcap reader (minimal, no libpcap dependency) -----------------
  *
  * Native-endian standard-magic header layout per pcap(5). We only support
- * the magic 0xa1b2c3d4 (no swap) since meshtastic-sniffer always writes
+ * the magic 0xa1b2c3d4 (no swap) since meshcore-sniffer always writes
  * native-endian. Refusing to swap keeps the reader 30 lines instead of 60. */
 
 struct pcap_global_hdr {
@@ -83,7 +83,7 @@ static int read_pcap_global(FILE *f)
         return -1;
     }
     if (h.magic != 0xa1b2c3d4) {
-        fprintf(stderr, "recover: pcap magic 0x%08x unexpected (need native-LE 0xa1b2c3d4 from meshtastic-sniffer)\n", h.magic);
+        fprintf(stderr, "recover: pcap magic 0x%08x unexpected (need native-LE 0xa1b2c3d4 from meshcore-sniffer)\n", h.magic);
         return -1;
     }
     if (h.network != 147 /* DLT_USER0 */) {
@@ -337,7 +337,7 @@ static const char USAGE[] =
     "Examples:\n"
     "  meshtastic-recover --pcap=session.pcap --wordlist=/usr/share/dict/words \\\n"
     "                     --simple-keys --output=recovered.keys\n"
-    "  meshtastic-sniffer --file=session.pcap --keys-file=recovered.keys\n";
+    "  meshcore-sniffer --file=session.pcap --keys-file=recovered.keys\n";
 
 int main(int argc, char **argv)
 {

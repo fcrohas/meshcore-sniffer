@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * File-replay backend for meshtastic-sniffer.
+ * File-replay backend for meshcore-sniffer.
  *
  * Reads CI8 / CI16 / CF32 IQ from a file at full speed (no rate
  * pacing -- the channelizer is the bottleneck and we want maximum

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: long-term JSONL archive sink.
+ * meshcore-sniffer: long-term JSONL archive sink.
  *
  * When --archive=DIR is set, every emitted JSON event is appended to a
  * daily-rotated gzipped file at DIR/meshtastic-YYYYMMDD.jsonl.gz.

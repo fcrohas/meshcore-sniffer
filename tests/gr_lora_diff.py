@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Cross-check meshtastic-sniffer against gr-lora_sdr on a recorded .cs8 capture.
+"""Cross-check meshcore-sniffer against gr-lora_sdr on a recorded .cs8 capture.
 
 Runs both decoders on the same IQ file, extracts distinct CRC-valid
 (from, packet_id) tuples from each, and prints MATCH / MISSING / EXTRA.
 
 MATCH    -- both decoders produced a CRC-valid frame with this (from, packet_id)
-MISSING  -- gr-lora_sdr decoded it; meshtastic-sniffer did not  (sensitivity gap)
-EXTRA    -- meshtastic-sniffer decoded it; gr-lora_sdr did not  (we caught more, or false positive)
+MISSING  -- gr-lora_sdr decoded it; meshcore-sniffer did not  (sensitivity gap)
+EXTRA    -- meshcore-sniffer decoded it; gr-lora_sdr did not  (we caught more, or false positive)
 
 A fixture can list expected_packet_ids. If set, the script enforces every
 expected ID appears in both sides' CRC-valid sets and exits non-zero
@@ -33,7 +33,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 GR_LORA = REPO / "tools" / "gr_lora_usrp_rx.py"
-SNIFFER = REPO / "build" / "meshtastic-sniffer"
+SNIFFER = REPO / "build" / "meshcore-sniffer"
 
 
 @dataclass
@@ -122,7 +122,7 @@ def parse_gr_lora_output(text: str) -> set[tuple[str, int]]:
 
 
 def parse_sniffer_output(text: str) -> set[tuple[str, int]]:
-    """Return distinct CRC-pass (from, packet_id) tuples from meshtastic-sniffer JSON."""
+    """Return distinct CRC-pass (from, packet_id) tuples from meshcore-sniffer JSON."""
     out: set[tuple[str, int]] = set()
     for line in text.splitlines():
         line = line.strip()
@@ -318,7 +318,7 @@ def main() -> int:
     p.add_argument("--skip-gr-lora", action="store_true",
                    help="Skip gr-lora_sdr (use cached gr_lora.txt in workdir)")
     p.add_argument("--skip-sniffer", action="store_true",
-                   help="Skip meshtastic-sniffer (use cached sniffer.jsonl in workdir)")
+                   help="Skip meshcore-sniffer (use cached sniffer.jsonl in workdir)")
     p.add_argument("--from-jsonl",
                    help="Path to a prior sniffer JSONL feed. The script reads every "
                         "(freq_hz, bw_hz, sf) slot that produced at least one "
@@ -355,7 +355,7 @@ def main() -> int:
         print(f"capture not found: {fix.capture}", file=sys.stderr)
         return 2
     if not SNIFFER.exists():
-        print(f"meshtastic-sniffer binary not built at {SNIFFER}", file=sys.stderr)
+        print(f"meshcore-sniffer binary not built at {SNIFFER}", file=sys.stderr)
         return 2
     if not GR_LORA.exists():
         print(f"gr-lora cross-check tool missing: {GR_LORA}", file=sys.stderr)
@@ -375,7 +375,7 @@ def main() -> int:
     extra   = sn_set - gr_set
 
     print()
-    print(f"=== gr-lora_sdr vs meshtastic-sniffer on {fix.name} ===")
+    print(f"=== gr-lora_sdr vs meshcore-sniffer on {fix.name} ===")
     print(f"  capture       : {fix.capture}")
     print(f"  slot          : {fix.channel_freq/1e6:.3f} MHz, BW {fix.bw/1e3:g} kHz, SF{fix.sf}")
     print(f"  gr-lora       : {len(gr_set)} distinct CRC-ok")
@@ -403,7 +403,7 @@ def main() -> int:
             print(f"  FAIL: gr-lora_sdr did not decode: {', '.join(f'0x{p:08x}' for p in sorted(miss_gr))}")
             rc = 1
         if miss_sn:
-            print(f"  FAIL: meshtastic-sniffer did not decode: {', '.join(f'0x{p:08x}' for p in sorted(miss_sn))}")
+            print(f"  FAIL: meshcore-sniffer did not decode: {', '.join(f'0x{p:08x}' for p in sorted(miss_sn))}")
             rc = 1
         if not miss_gr and not miss_sn:
             print(f"  OK: all {len(fix.expected_packet_ids)} known packet IDs decoded by both")

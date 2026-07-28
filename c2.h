@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: command-and-control dispatch.
+ * meshcore-sniffer: command-and-control dispatch.
  *
  * Transport-independent C2 handlers. The HTTP web layer (web.c) calls
  * these from POST /api endpoint handlers; a future ZMQ DEALER c2 path will
@@ -38,6 +38,7 @@ void c2_keys_add        (const char *body, c2_response_t *out);
 void c2_share_url       (const char *body, c2_response_t *out);
 void c2_extra_freq      (const char *body, c2_response_t *out);
 void c2_cot_multicast   (const char *body, c2_response_t *out);
+void c2_meshcore_channel_add(const char *body, c2_response_t *out);
 
 /* Name-based dispatch used by transports that carry the command in an
  * envelope (DEALER socket, future RPC). Supported commands map to the
@@ -46,6 +47,7 @@ void c2_cot_multicast   (const char *body, c2_response_t *out);
  *   "share_url" -> c2_share_url
  *   "extra_freq" -> c2_extra_freq
  *   "cot_multicast" -> c2_cot_multicast
+ *   "meshcore_channel_add" -> c2_meshcore_channel_add
  * Unknown command names produce a 404 response. */
 void c2_dispatch(const char *cmd, const char *body, c2_response_t *out);
 

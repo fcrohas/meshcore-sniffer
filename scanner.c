@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: off-grid LoRa discovery (energy-based v1).
+ * meshcore-sniffer: off-grid LoRa discovery (energy-based v1).
  *
  * Pipeline:
  *   wideband samples -> N-point FFT (every K input blocks)

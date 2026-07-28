@@ -27,7 +27,7 @@ import numpy as np
 
 REPO    = Path(__file__).resolve().parent.parent
 SYNTH   = REPO / "tests" / "sensitivity_synth.py"
-SNIFFER = REPO / "build" / "meshtastic-sniffer"
+SNIFFER = REPO / "build" / "meshcore-sniffer"
 
 SF      = 7
 CR_GR   = 1     # gr-lora enum -> 4/5

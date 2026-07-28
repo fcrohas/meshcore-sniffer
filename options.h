@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: CLI option parsing and shared runtime state.
+ * meshcore-sniffer: CLI option parsing and shared runtime state.
  *
  */
 
@@ -36,6 +36,14 @@ typedef enum {
     OP_MODE_SCAN_AND_DECODE,   /* both: decode the grid, alert on off-grid */
 } op_mode_t;
 
+/* Application-layer protocol running over the LoRa CSS physical
+ * layer. MESHTASTIC is the default and exercises the pre-existing
+ * decode path unchanged; MESHCORE is strictly additive. */
+typedef enum {
+    MESH_PROTOCOL_MESHTASTIC = 0,
+    MESH_PROTOCOL_MESHCORE,
+} mesh_protocol_t;
+
 /* ---- Shared runtime state ---- */
 
 extern volatile sig_atomic_t running;  /* set to 0 by SIGINT/SIGTERM */
@@ -62,6 +70,10 @@ extern bool          opt_alert_off_grid;
 extern bool          opt_list_devices;
 extern bool          opt_print_schema;
 extern bool          opt_trusted_only;
+/* Single-bit CRC brute-force correction for CRC-fail LoRa frames (see
+ * lora_crc_bruteforce_correct in lora.h/.c). Default on; --no-crc-bruteforce
+ * disables it for operators who want raw CRC-fail visibility unmodified. */
+extern bool          opt_crc_bruteforce;
 extern bool          opt_show_untrusted;
 extern bool          opt_diagnostics;
 
@@ -104,6 +116,19 @@ extern char         *opt_stats_json;      /* path to dump 5s per-channel stats J
  * default XDG cache path. Non-empty = use the explicit path. */
 extern char         *opt_fftw_wisdom;
 
+/* MeshCore (--protocol=meshcore). No region/preset table -- SF/BW/CR/freq
+ * are plain CLI parameters (see --meshcore-freq/-sf/-bw/-cr). Channels
+ * are (name, 32-byte secret) pairs, repeatable like --feed. */
+extern mesh_protocol_t opt_protocol;
+#define MESHCORE_CHANNEL_MAX 8
+extern char         *opt_meshcore_channel[MESHCORE_CHANNEL_MAX];
+extern int           opt_meshcore_channel_count;
+extern uint64_t       opt_meshcore_freq_hz;
+extern int            opt_meshcore_sf;
+extern int            opt_meshcore_bw_hz;
+extern int            opt_meshcore_cr;
+extern bool           opt_meshcore_no_default_channel;
+
 /* Webhook sink. NULL url = disabled. event_csv NULL/empty uses the
  * default allowlist (PSK_DISCOVERED, OFF_GRID_LORA, GEOFENCE_*).
  * format selects the wire shape: "raw" (default), "slack", "discord". */
@@ -138,6 +163,9 @@ extern int  rtl_gain_tenths_db;          /* tenths of dB; <0 = AGC */
 extern int  airspy_gain_val;             /* 0..21; <0 = default */
 extern char *sdrplay_serial;
 extern int  sdrplay_gain_val;
+extern int  sdrplay_lna_state;           /* -1 = default (0); explicit LNA reduction state, model/band-dependent max */
+extern int  sdrplay_agc_mode;            /* -1 = derive from --gain sign (legacy); 0 = force manual; 1 = force AGC */
+extern int  sdrplay_agc_setpoint_dbfs;   /* AGC target level in dBFS, default -30 */
 extern int  soapy_num;
 extern char *soapy_args;
 #define SOAPY_GAINS_MAX 8
@@ -172,7 +200,22 @@ extern char *opt_api_token;              /* bearer token for POST /api endpoints
 extern char *opt_pcap_path;              /* path to pcap file; NULL = disabled */
 extern char *opt_pcap_fifo;              /* path to pcap fifo; NULL = disabled */
 extern char *opt_psk_wordlist;           /* path to wordlist; NULL = disabled */
+/* Defaults to the bundled MIT-licensed French wordlist
+ * (recover/wordlists/french.txt, MC_DEFAULT_HASHTAG_WORDLIST) so the
+ * background hashtag-channel dictionary attack runs out of the box;
+ * NULL only if that default file couldn't be resolved at build time.
+ * --meshcore-hashtag-wordlist=PATH overrides it; --no-meshcore-hashtag-dict
+ * disables the attack entirely regardless of this path. */
+extern char *opt_meshcore_hashtag_wordlist;
+extern bool  opt_meshcore_no_hashtag_dict;
 extern char *opt_archive_dir;            /* JSONL archive directory; NULL = disabled */
+extern char *opt_sqlite_db;              /* SQLite DB path; NULL = disabled */
+/* Cross-restart recovery window: on startup, replay events.json rows
+ * newer than this many hours into the SSE history ring (see
+ * db_sqlite_replay_recent()). Node list reload is separate and
+ * uncapped -- always happens whenever --sqlite-db is set. <= 0 disables
+ * the event replay (node list reload still happens). */
+extern double opt_history_replay_hours;
 extern char *opt_geofence_file;          /* polygon file path; NULL = disabled */
 extern char *opt_announce_to;            /* fusion /api/sensors URL; NULL = disabled */
 extern char *opt_c2_dealer;              /* tcp://fusion:7009; NULL = HTTP-only */

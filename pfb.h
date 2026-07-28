@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: polyphase filterbank channelizer.
+ * meshcore-sniffer: polyphase filterbank channelizer.
  *
  * Decimator-by-M PFB with critical sampling: input at Fs, M output
  * channels at Fs/M each. Channels are uniformly spaced by Fs/M starting

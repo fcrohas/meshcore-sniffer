@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 CEMAXECUTER LLC
 //
-// wardrive/sniffer_proc.go: spawn meshtastic-sniffer as a child
+// wardrive/sniffer_proc.go: spawn meshcore-sniffer as a child
 // process and manage its lifecycle.
 //
 // Reuses the existing C sniffer for radio control and bit-level DSP
@@ -25,12 +25,12 @@ import (
 	"time"
 )
 
-// SnifferProc owns a child `meshtastic-sniffer` process. Start()
+// SnifferProc owns a child `meshcore-sniffer` process. Start()
 // launches it; the process runs until ctx is cancelled or the
 // child exits. On unexpected exit the parent logs and exits with
 // status 1 (wardrive's invariant: no radio == no useful work).
 type SnifferProc struct {
-	BinaryPath  string   // path to the meshtastic-sniffer binary
+	BinaryPath  string   // path to the meshcore-sniffer binary
 	Args        []string // forwarded flags (--hackrf, --keys, ...)
 	ZMQEndpoint string   // tcp://127.0.0.1:7008 by default; appended to Args
 	StderrSink  io.Writer
@@ -39,13 +39,13 @@ type SnifferProc struct {
 	cmd *exec.Cmd
 }
 
-// FindSnifferBinary looks for meshtastic-sniffer in the usual places.
+// FindSnifferBinary looks for meshcore-sniffer in the usual places.
 // Order:
 //
 //	1. WARDRIVE_SNIFFER env var (operator override)
-//	2. ./meshtastic-sniffer in CWD
-//	3. ../build/meshtastic-sniffer (developer working tree)
-//	4. /usr/local/bin/meshtastic-sniffer
+//	2. ./meshcore-sniffer in CWD
+//	3. ../build/meshcore-sniffer (developer working tree)
+//	4. /usr/local/bin/meshcore-sniffer
 //	5. PATH lookup
 //
 // Returns the resolved absolute path or an error if no candidate
@@ -59,10 +59,10 @@ func FindSnifferBinary() (string, error) {
 		}
 	}
 	candidates := []string{
-		"./meshtastic-sniffer",
-		"../build/meshtastic-sniffer",
-		"../meshtastic-sniffer",
-		"/usr/local/bin/meshtastic-sniffer",
+		"./meshcore-sniffer",
+		"../build/meshcore-sniffer",
+		"../meshcore-sniffer",
+		"/usr/local/bin/meshcore-sniffer",
 	}
 	for _, p := range candidates {
 		abs, err := filepath.Abs(p)
@@ -75,10 +75,10 @@ func FindSnifferBinary() (string, error) {
 			}
 		}
 	}
-	if p, err := exec.LookPath("meshtastic-sniffer"); err == nil {
+	if p, err := exec.LookPath("meshcore-sniffer"); err == nil {
 		return p, nil
 	}
-	return "", errors.New("meshtastic-sniffer not found in PATH; set WARDRIVE_SNIFFER=/path")
+	return "", errors.New("meshcore-sniffer not found in PATH; set WARDRIVE_SNIFFER=/path")
 }
 
 // Start launches the sniffer subprocess. Blocking call: returns when

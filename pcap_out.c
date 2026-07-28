@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: PCAP file/pipe output for Wireshark workflows.
+ * meshcore-sniffer: PCAP file/pipe output for Wireshark workflows.
  *
  * libpcap classic format:
  *

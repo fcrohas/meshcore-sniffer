@@ -1,6 +1,6 @@
 # meshtastic-fusion
 
-Multi-station aggregator for [meshtastic-sniffer](../README.md). Subscribes to N sniffer ZMQ feeds, presents one dashboard over all of them, and fans command operations (add key, promote off-grid, etc.) to every registered sensor in one click.
+Multi-station aggregator for [meshcore-sniffer](../README.md). Subscribes to N sniffer ZMQ feeds, presents one dashboard over all of them, and fans command operations (add key, promote off-grid, etc.) to every registered sensor in one click.
 
 A separate Go binary so it can be deployed on a different host than the SDR-attached sniffers. The sniffer side stays C; fusion is HTTP/SSE/state-shuffling work that's a better fit for Go's stdlib.
 
@@ -41,7 +41,7 @@ Run a single sniffer + fusion on the same machine:
 
 ```bash
 # Terminal 1: sniffer with ZMQ telemetry exposed
-./build/meshtastic-sniffer --hackrf --rate=20000000 --center=915000000 \
+./build/meshcore-sniffer --hackrf --rate=20000000 --center=915000000 \
     --presets=all --region=US --keys=default \
     --web=8888 --zmq=tcp://*:7008 --station-id=hackrf-rx
 
@@ -65,10 +65,10 @@ Two-station deployment? Same pattern, different ports / different machines:
 
 ```bash
 # rooftop sensor
-./build/meshtastic-sniffer ... --zmq=tcp://*:7008 --station-id=rooftop --gpsd
+./build/meshcore-sniffer ... --zmq=tcp://*:7008 --station-id=rooftop --gpsd
 
 # basement sensor
-./build/meshtastic-sniffer ... --zmq=tcp://*:7008 --station-id=basement --gpsd
+./build/meshcore-sniffer ... --zmq=tcp://*:7008 --station-id=basement --gpsd
 
 # fusion (could be on a third machine)
 ./fusion/meshtastic-fusion --listen=:9000 \

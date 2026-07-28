@@ -4,7 +4,7 @@
 #
 # multi_subscribe.py -- reference multi-sensor aggregator.
 #
-# Subscribes to N meshtastic-sniffer ZMQ PUB sockets (each station has
+# Subscribes to N meshcore-sniffer ZMQ PUB sockets (each station has
 # its own --zmq=tcp://*:7008 listening), groups same-packet observations
 # by (from, packet_id) within a time window, and prints one consolidated
 # line per real transmission showing which stations heard it.

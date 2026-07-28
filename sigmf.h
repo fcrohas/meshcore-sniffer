@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: SigMF metadata reader.
+ * meshcore-sniffer: SigMF metadata reader.
  *
  * If user passes --file=PATH and a sibling PATH.sigmf-meta exists,
  * pull core:sample_rate, core:frequency, and core:datatype from it

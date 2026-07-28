@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: built-in web dashboard.
+ * meshcore-sniffer: built-in web dashboard.
  *
  * HTTP server on port opt_web_port. Endpoints:
  *   GET /              -- embedded HTML+JS dashboard with Leaflet map

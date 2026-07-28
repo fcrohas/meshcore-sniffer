@@ -15,6 +15,7 @@
 
 #include "focused.h"
 #include "sdr.h"
+#include "options.h"
 
 #include <complex.h>
 #include <math.h>
@@ -34,8 +35,36 @@
 
 #define FOCUSED_BATCH_SAMPLES   16384
 #define FOCUSED_POLL_USEC        2000   /* 2 ms; trades latency for CPU */
-#define FOCUSED_LPF_TAPS          257   /* good for os=1; lengthen for os>1 */
+#define FOCUSED_LPF_TAPS          257   /* floor; good for typical decim<=~20 */
+#define FOCUSED_LPF_TAPS_MAX     2049   /* CPU/memory cap for extreme decim */
 #define FOCUSED_PHASOR_RENORM   4096    /* every N samples; |phasor| -> 1 */
+
+/* Windowed-sinc FIR length needed for a decent channel-select filter
+ * scales with the decimation ratio (sr / bw_hz), NOT a fixed constant.
+ * FOCUSED_LPF_TAPS=257 was tuned against typical Meshtastic decim
+ * ratios (BW=125..500kHz against a few-Msps capture, ratio <= ~20).
+ * Harris' rule of thumb for a Hamming-windowed sinc gives a -3dB-to
+ * -stopband transition width of roughly 3.3*sr/n_taps; requesting a
+ * transition no wider than half the channel BW (so the passband
+ * doesn't bleed heavily into neighbouring spectrum) means
+ *     n_taps >= 3.3*sr / (0.5*bw_hz) = 6.6 * (sr/bw_hz)
+ * A single very-narrow focused channel pulled out of a wide capture
+ * (e.g. MeshCore's 62.5kHz channel out of a 5Msps capture, decim=80)
+ * needs ~528 taps here -- the fixed 257-tap filter's transition band
+ * is *wider than the channel itself*, so nearly the whole 5MHz
+ * capture leaks into the decimated output and swamps the real signal.
+ * Clamped to FOCUSED_LPF_TAPS_MAX to bound the FIR's per-sample cost
+ * for pathological BW/sr ratios. */
+static int focused_required_lpf_taps(double sr, int bw_hz)
+{
+    if (bw_hz <= 0 || sr <= 0.0) return FOCUSED_LPF_TAPS;
+    double ratio = sr / (double)bw_hz;
+    int n = (int)ceil(6.6 * ratio);
+    if (n < FOCUSED_LPF_TAPS) n = FOCUSED_LPF_TAPS;
+    if (n > FOCUSED_LPF_TAPS_MAX) n = FOCUSED_LPF_TAPS_MAX;
+    if ((n & 1) == 0) n += 1;
+    return n;
+}
 
 struct focused_worker {
     focused_cfg_t cfg;
@@ -74,6 +103,7 @@ struct focused_worker {
     int   phasor_renorm_count;
     float *taps;
     int    n_taps;
+    int    taps_capacity;   /* allocated length of taps[]/delay[]; may exceed n_taps */
     float complex *delay;
     int    delay_head;
     int    decim;
@@ -297,10 +327,38 @@ static int focused_apply_slot_locked(focused_worker_t *w)
     w->decim = decim;
     w->decim_phase = 0;
     w->channel_rate = sr / (double)decim;
-    /* Reuse the taps + delay buffer (size is fixed by FOCUSED_LPF_TAPS);
-     * just rebuild the LPF shape for the new BW. */
-    w->n_taps = build_lpf(w->n_taps > 0 ? w->n_taps : FOCUSED_LPF_TAPS,
-                          sr, (double)w->cur_bw_hz * 0.5, w->taps);
+    /* Grow the taps/delay buffers if this slot's BW/sr ratio needs a
+     * longer filter than what's currently allocated (see
+     * focused_required_lpf_taps() above). Shrinking never reallocates
+     * -- build_lpf() below just uses a shorter prefix of the same
+     * buffer -- so repeated re-arms toward narrower channels don't
+     * thrash the allocator. */
+    {
+        int want_taps = focused_required_lpf_taps(sr, w->cur_bw_hz);
+        if (want_taps > w->taps_capacity) {
+            float *new_taps = realloc(w->taps, sizeof(float) * (size_t)want_taps);
+            float complex *new_delay = realloc(w->delay,
+                sizeof(float complex) * (size_t)(2 * want_taps));
+            if (new_taps)  w->taps  = new_taps;
+            if (new_delay) w->delay = new_delay;
+            if (new_taps && new_delay) {
+                w->taps_capacity = want_taps;
+            } else {
+                fprintf(stderr,
+                    "focused[%s]: LPF grow to %d taps failed (alloc), "
+                    "falling back to %d taps -- channel selectivity will "
+                    "be degraded for this BW/sr ratio\n",
+                    w->label_buf, want_taps, w->taps_capacity);
+            }
+        }
+    }
+    /* Rebuild the LPF shape for the new BW at the length this slot
+     * actually needs (may be shorter than taps_capacity if a previous
+     * slot needed a longer filter -- we never shrink the allocation,
+     * just use a shorter prefix of it). */
+    int use_taps = focused_required_lpf_taps(sr, w->cur_bw_hz);
+    if (use_taps > w->taps_capacity) use_taps = w->taps_capacity;
+    w->n_taps = build_lpf(use_taps, sr, (double)w->cur_bw_hz * 0.5, w->taps);
     memset(w->delay, 0, sizeof(float complex) * (size_t)(2 * w->n_taps));
     w->delay_head = 0;
     /* Decoder is bound to (sf, cr, bw, os) at create -- destroy and
@@ -313,6 +371,7 @@ static int focused_apply_slot_locked(focused_worker_t *w)
                 w->label_buf, w->cur_sf, w->cur_cr, w->cur_bw_hz, os);
         return -1;
     }
+    lora_decoder_set_crc_bruteforce(w->dec, opt_crc_bruteforce);
     lora_decoder_set_callback(w->dec, focused_frame_trampoline,
                               w->frame_trampoline_ctx);
     lora_decoder_set_center_freq(w->dec, w->cur_channel_hz);
@@ -551,6 +610,7 @@ focused_worker_t *focused_worker_create(const focused_cfg_t *cfg)
      * window without per-tap modulo (same trick as the PFB's
      * dly[]). */
     w->n_taps = FOCUSED_LPF_TAPS;
+    w->taps_capacity = FOCUSED_LPF_TAPS;
     w->taps   = malloc(sizeof(float) * (size_t)w->n_taps);
     if (!w->taps) { pthread_mutex_destroy(&w->cfg_mu); free(w); return NULL; }
     w->delay  = calloc((size_t)(2 * w->n_taps), sizeof(float complex));

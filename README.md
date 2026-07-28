@@ -1,6 +1,6 @@
-# meshtastic-sniffer
+# meshcore-sniffer
 
-A passive Meshtastic LoRa receiver written in C. Takes one wide IQ slice from a single SDR and runs two decode paths in parallel:
+A passive dual-protocol LoRa receiver written in C, covering both **Meshtastic** and **MeshCore**. Takes one wide IQ slice from a single SDR and runs two decode paths in parallel:
 
 - **Wideband polyphase channelizer**, always on. Configures one LoRa decoder per Meshtastic channel slot that fits inside the SDR's bandwidth, and runs them concurrently. On a B205mini at 26 Msps this covers the full US 902-928 MHz band with every channel decoded at once.
 - **Focused decoder pool**, on demand. A bounded set of workers (default 2, up to 4) that wake on wideband preamble detections, rewind raw IQ from a short ring buffer, and run a cleaner per-slot decode at the same time. Idle until needed; never slows the wideband path.
@@ -20,7 +20,7 @@ The wideband channelizer covers everything in the slice at the rate the SDR can 
 Deep-decode is **on by default** (`--deep-decode=auto`). Pass `--deep-decode=off` to disable it on weak CPUs or when you specifically want the wideband-only path. A typical run:
 
 ```bash
-./meshtastic-sniffer --usrp --rate=20000000 --center=915000000 \
+./meshcore-sniffer --usrp --rate=20000000 --center=915000000 \
                     --region=US --presets=all --keys=default \
                     --trusted-only --web=8888
 ```
@@ -56,9 +56,27 @@ When a worker can't keep up with the live sample rate, it disarms itself and cou
 
 ---
 
+## MeshCore support
+
+`--protocol=meshcore` switches the same channelizer/focused-decode pipeline to MeshCore's LoRa framing instead of Meshtastic's. Everything else (dedup, JSON/MQTT/ZMQ/CoT/pcap/web outputs, deep-decode) applies unchanged.
+
+```bash
+./meshcore-sniffer --sdrplay --meshcore-freq=869618000 --meshcore-sf=8 \
+                    --meshcore-cr=8 --meshcore-bw=62500 --protocol=meshcore \
+                    --web=8888
+```
+
+- **Payload decode**: ADVERT (node identity + Ed25519 signature verification), GRP_TXT/GRP_DATA (channel chat/data, HMAC-SHA256 + AES-128-ECB), TRACE (route/SNR hops), ACK, and envelope-only parsing (dest/src hashes) for REQ/RESPONSE/PATH/TXT_MSG/ANON_REQ where a passive sniffer has no key material to go further.
+- **Channels**: the official "Public" channel and a handful of common hashtag channels (`test`, `bot`, `meteo`, `fr`, `fr-30`, `fr-34`, `fr-occ`) preload automatically, so `--protocol=meshcore` decodes real traffic out of the box. Add more with `--meshcore-channel=NAME:SECRET` (explicit PSK, hex or base64) or by bare name for a hashtag channel (secret derived from the name itself, same as the official app's no-key "Add Channel" flow) — the dashboard's Channels tab has an equivalent no-key add control.
+- **Hashtag-channel dictionary attack**: every undecrypted GRP_TXT/GRP_DATA frame is queued to a background thread that tries candidate channel names (plus automatic case variants) against it. On by default using a bundled ~23k-word French list (MIT licensed, `recover/wordlists/`) plus a generated set of French department/region codes (`fr-01`..`fr-99`, `fr-idf`, `fr-occ`, ...); point `--meshcore-hashtag-wordlist=PATH` at your own list, or `--no-meshcore-hashtag-dict` to disable it entirely. A hit promotes the channel into the live channelset and fires an `MC_CHANNEL_DISCOVERED` event — no restart needed. See [meshcore-recover](recover/) for the offline, single-frame equivalent.
+- **Dashboard**: the Channels tab lists every channel hash seen, decrypted or not, with per-channel chat history, and bootstraps previously-learned channel names from the SQLite DB on page load (`--sqlite-db`) so a browser refresh doesn't lose them.
+
+---
+
 ## Companion tools
 
 - [meshtastic-recover](recover/) — offline PSK recovery from captured pcaps. OpenMP-parallel; a hashcat custom-mode plugin handles GPU.
+- [meshcore-recover](recover/) — offline hashtag-channel recovery for MeshCore: reads a pcap and a wordlist, tries the same HMAC-verify + AES-128-ECB decrypt the live decoder uses, and prints any channel names that crack.
 - [meshtastic-fusion](fusion/) — multi-station aggregator (Go). Subscribes to N sniffer ZMQ feeds, runs hyperbolic-TDOA when 3+ time-disciplined stations hear the same packet.
 - [meshtastic-wardrive](wardrive/) — mobile single-node capture (Go). SDR + GPS + SQLite + KML/KMZ/CSV/JSON exports.
 
@@ -71,8 +89,8 @@ When a worker can't keep up with the live sample rate, it disarms itself and cou
 DragonOS Noble already ships with HackRF, BladeRF, UHD, RTL-SDR, Airspy, SDRplay, SoapySDR, OpenSSL, FFTW3, libmosquitto, and libzmq. Don't `apt install` the SDR libraries on top — that can replace the DragonOS-tuned versions.
 
 ```bash
-git clone https://github.com/alphafox02/meshtastic-sniffer.git
-cd meshtastic-sniffer
+git clone https://github.com/fcrohas/meshcore-sniffer.git
+cd meshcore-sniffer
 mkdir build && cd build
 cmake .. && make -j$(nproc)
 ```
@@ -91,12 +109,12 @@ sudo apt install libhackrf-dev libbladerf-dev libuhd-dev \
 # Optional sinks
 sudo apt install libmosquitto-dev libzmq3-dev libsodium-dev
 
-git clone https://github.com/alphafox02/meshtastic-sniffer.git
-cd meshtastic-sniffer && mkdir build && cd build
+git clone https://github.com/fcrohas/meshcore-sniffer.git
+cd meshcore-sniffer && mkdir build && cd build
 cmake .. && make -j$(nproc)
 ```
 
-CMake prints which backends it found. Run `./meshtastic-sniffer --list` to confirm your SDR shows up.
+CMake prints which backends it found. Run `./meshcore-sniffer --list` to confirm your SDR shows up.
 
 ---
 
@@ -104,28 +122,33 @@ CMake prints which backends it found. Run `./meshtastic-sniffer --list` to confi
 
 ```bash
 # Default: wideband-only, US region, default LongFast key, dashboard at :8888
-./meshtastic-sniffer --hackrf --keys=default --web=8888
+./meshcore-sniffer --hackrf --keys=default --web=8888
 
 # Paste a channel-share URL from the Meshtastic app to import a key:
-./meshtastic-sniffer --hackrf --share-url='https://meshtastic.org/e/#CgM...'
+./meshcore-sniffer --hackrf --share-url='https://meshtastic.org/e/#CgM...'
 
 # B205 covering full US 902-928 MHz at 26 Msps:
-./meshtastic-sniffer --usrp --rate=26000000 --center=915000000 \
+./meshcore-sniffer --usrp --rate=26000000 --center=915000000 \
                     --usrp-otw=sc8 --gain=40 --region=US --presets=all \
                     --keys=default --trusted-only --web=8888
 
 # Replay an IQ file:
-./meshtastic-sniffer --file=capture.cf32 --keys=default
+./meshcore-sniffer --file=capture.cf32 --keys=default
 
 # Network IQ in (VITA-49): rate, RF freq, and IQ format are taken from the
 # sender's IF-context packets -- add --iq-format only if the sender omits it.
-./meshtastic-sniffer --vita49=4991 --keys=default
+./meshcore-sniffer --vita49=4991 --keys=default
+
+# MeshCore instead of Meshtastic (see "MeshCore support" above):
+./meshcore-sniffer --hackrf --protocol=meshcore --meshcore-freq=869618000 \
+                    --meshcore-sf=8 --meshcore-cr=8 --meshcore-bw=62500 \
+                    --sqlite-db=./base.db --web=8888
 
 # List attached SDRs:
-./meshtastic-sniffer --list
+./meshcore-sniffer --list
 
 # Self-tests:
-./meshtastic-sniffer --selftest
+./meshcore-sniffer --selftest
 ```
 
 The dashboard's **Config** tab adds keys and channel-share URLs at runtime, no restart needed.
@@ -167,7 +190,7 @@ Default UHD wire format is `sc16` (4 bytes/sample). At 26 Msps that's 104 MB/s o
 Use `--usrp-otw=sc8` for sustained 26 Msps: halves USB bandwidth and host conversion work, no measurable SNR loss for LoRa.
 
 ```bash
-./meshtastic-sniffer --usrp --rate=26000000 --center=915000000 \
+./meshcore-sniffer --usrp --rate=26000000 --center=915000000 \
                     --region=US --presets=all --keys=default \
                     --usrp-otw=sc8 --gain=40 --web=8888
 ```
@@ -186,14 +209,16 @@ Reference: short B205mini validation hits 26.02 Msps with all 1024 channels live
 - **CoT XML multicast** (`--cot-multicast=239.2.3.1:6969`) for ATAK-CIV / WinTAK / iTAK
 - **PCAP streaming** (`--pcap=PATH` rotating file, `--pcap-fifo=PATH` named pipe)
 - **Daily gzipped JSONL archive** (`--archive=DIR`)
-- **Web dashboard** (`--web=8888`): Live map, Activity, Topology, Config tabs
+- **SQLite** (`--sqlite-db=PATH`): structured per-event rows for querying/filtering, plus cross-restart recovery — node list and recent dashboard history (`--history-replay-hours`) reload from the DB on startup instead of a blank dashboard.
+- **Webhooks** (`--webhook-url=URL`): opt-in JSON POST sink for selected events (default: `PSK_DISCOVERED`, `OFF_GRID_LORA`, `GEOFENCE_ENTRY`/`EXIT`; override with `--webhook-on`). `--webhook-format=raw|slack|discord` shapes the POST body for a plain endpoint, a Slack incoming-webhook, or a Discord webhook respectively.
+- **Web dashboard** (`--web=8888`): Live map, Channels (per-channel message log with routing path), Topology, Config tabs
 
 The web dashboard's Config tab adds keys and `meshtastic.org/e/` channel-share URLs at runtime. Equivalent endpoints at `POST /api/keys` and `POST /api/share-url`. Optional bearer-token auth: `--api-token=SECRET`.
 
 <details>
 <summary>JSON event schema</summary>
 
-`./meshtastic-sniffer --schema` dumps the canonical JSON Schema 2020-12 for everything emitted.
+`./meshcore-sniffer --schema` dumps the canonical JSON Schema 2020-12 for everything emitted.
 
 Per-frame fields include `from`, `to`, `packet_id`, `channel_hash`, optional `freq_hz` and `slot_id`, `hop_limit`, `hop_start`, `rssi_db`, `snr_db`, and a `cfo_hz` drift estimate when out of tolerance.
 
@@ -239,7 +264,7 @@ focus-pool:     promotions total=18 matched_existing=15 assigned_idle=3
 `--scan` (no decode) or `--scan-and-decode` (both) enables an occupied-bandwidth scanner that flags LoRa-shaped energy outside the configured Meshtastic grid as `OFF_GRID_LORA` events. Useful for finding custom community channels, drone telemetry, or any non-standard LoRa traffic in the band.
 
 ```bash
-./meshtastic-sniffer --hackrf --scan --alert-off-grid
+./meshcore-sniffer --hackrf --scan --alert-off-grid
 ```
 
 ---
@@ -250,7 +275,7 @@ focus-pool:     promotions total=18 matched_existing=15 assigned_idle=3
 
 ```bash
 ./meshtastic-recover --pcap=session.pcap --simple-keys --output=recovered.keys
-./meshtastic-sniffer --file=session.pcap --keys-file=recovered.keys
+./meshcore-sniffer --file=session.pcap --keys-file=recovered.keys
 ```
 
 Default channels and weak passphrases recover quickly; strong randomly-generated 16/32-byte PSKs are not feasible to recover.
@@ -262,7 +287,7 @@ Default channels and weak passphrases recover quickly; strong randomly-generated
 [meshtastic-fusion](fusion/) takes ZMQ feeds from N sniffer stations and runs hyperbolic-TDOA when 3+ time-disciplined stations hear the same packet. Sub-100 m with GPSDO+1PPS, around 300 m with chrony+PPS, more with NTP.
 
 ```bash
-./meshtastic-sniffer --hackrf --keys=default --station-id=rooftop \
+./meshcore-sniffer --hackrf --keys=default --station-id=rooftop \
                     --gpsd=localhost:2947 --zmq=tcp://*:7008 \
                     --announce-to=http://fusion.local:9000/api/sensors
 ```
@@ -282,7 +307,7 @@ Default channels and weak passphrases recover quickly; strong randomly-generated
 ## Self-test
 
 ```bash
-./meshtastic-sniffer --selftest    # channelizer routing + AES + protobuf end-to-end
+./meshcore-sniffer --selftest    # channelizer routing + AES + protobuf end-to-end
 bash tests/test_smoke.sh           # SigMF auto-config, --list, web /api round-trip
 ```
 
@@ -296,7 +321,7 @@ If `gnuradio` and `gr-lora_sdr` are installed, generate a real Meshtastic-shaped
 ```bash
 python3 tools/gen_meshtastic_iq.py --out=/tmp/meshtastic_test.cf32 \
                                     --text="Hello" --sf=11 --bw=250000 --cr=5
-./meshtastic-sniffer --file=/tmp/meshtastic_test.cf32 --rate=250000 \
+./meshcore-sniffer --file=/tmp/meshtastic_test.cf32 --rate=250000 \
                     --center=903000000 \
                     --extra-freq=903000000:bw=250000:sf=11:cr=5 \
                     --keys=default
@@ -314,8 +339,12 @@ GPL-3.0-or-later. Copyright (c) 2026 CEMAXECUTER LLC.
 
 This project is independent of and not affiliated with Meshtastic. "Meshtastic" is a trademark of [Meshtastic LLC](https://meshtastic.org). Protocol constants used here (default PSK, channel hash, AES-CTR nonce layout, region and preset tables) are interoperability facts derived from the upstream firmware at <https://github.com/meshtastic/firmware> (also GPL-3.0-or-later); no proprietary code is included.
 
+This project is a fork of [meshtastic-sniffer](https://github.com/alphafox02/meshtastic-sniffer) by **alphafox02**. The wideband/focused-decode dual-path architecture, dedup, SDR backends, Meshtastic protocol support, and the original web dashboard/output sinks are alphafox02's work; this fork builds directly on it. Everything MeshCore-specific — protocol constants, packet parser, per-payload-type decoders, hashtag-channel crypto + background dictionary attack, `meshcore-recover`, SQLite persistence, and webhooks — was added here.
+
 ### Upstream attribution
 
 - **gr-lora_sdr** by Joachim Tapparel @ EPFL TCL Lab (<https://github.com/tapparelj/gr-lora_sdr>, GPL-3.0-or-later). Significant portions of `lora.c`'s bit-level decode path (hard-decode Hamming, deinterleave, gray, dewhiten, preamble-mode-vote) are ported from gr-lora_sdr and verified bit-exact against its stage outputs. Per-stage citations are inline at the relevant call sites.
 - **Meshtastic firmware** (<https://github.com/meshtastic/firmware>, GPL-3.0-or-later). Wire format, default PSK, simpleN PSK derivation, channel-hash function, AES-CTR nonce layout, region/preset tables, and port number assignments come from the upstream firmware. Implementation is original; only the on-the-air constants are derived.
+- **MeshCore firmware** (<https://github.com/meshcore-dev/MeshCore>, GPL-3.0-or-later / MIT-family, see upstream repo). Wire format, payload types, the default "Public" channel PSK, hashtag-channel secret derivation, and the HMAC-SHA256 + AES-128-ECB group-channel framing come from the upstream firmware. Implementation is original; only the on-the-air constants and crypto scheme are derived. This project is independent of and not affiliated with MeshCore.
+- **French-Wordlist** by Pg (<https://github.com/Taknok/French-Wordlist>, MIT licensed, Copyright (c) 2019 — see `recover/wordlists/`) — bundled default candidate list for the MeshCore hashtag-channel dictionary attack.
 - **Felipe Kersting** — `blocking_queue.h` and `fair_lock.h` are vendored MIT-licensed primitives (Copyright (c) 2020).

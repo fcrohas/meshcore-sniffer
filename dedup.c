@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: dedup ring + two-tier matching.
+ * meshcore-sniffer: dedup ring + two-tier matching.
  *
  * Extracted from main.c so the matching logic is reachable from
  * standalone tests. Behaviour is preserved exactly; the only change

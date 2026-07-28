@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: PSK dictionary attack.
+ * meshcore-sniffer: PSK dictionary attack.
  *
  * When --psk-wordlist=PATH is set, every undecrypted frame is queued
  * for a background thread that tries each wordlist entry as a candidate

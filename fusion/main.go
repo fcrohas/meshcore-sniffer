@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 CEMAXECUTER LLC
 //
-// meshtastic-fusion: central aggregator for one-or-more meshtastic-sniffer
+// meshtastic-fusion: central aggregator for one-or-more meshcore-sniffer
 // stations. Subscribes to N sniffer ZMQ PUB feeds, groups same-packet
 // observations across stations by (from, packet_id) within a time window,
 // and prints / serves a consolidated view.
@@ -433,7 +433,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr,
 			"Usage: %s [flags] tcp://host1:7008 tcp://host2:7008 ...\n\n"+
-				"Subscribes to N meshtastic-sniffer ZMQ PUB feeds, groups same-packet\n"+
+				"Subscribes to N meshcore-sniffer ZMQ PUB feeds, groups same-packet\n"+
 				"observations by (from, packet_id), prints one consolidated line per\n"+
 				"real transmission with which stations heard it.\n\nFlags:\n",
 			os.Args[0])

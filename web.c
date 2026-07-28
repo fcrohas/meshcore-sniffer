@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: built-in web dashboard.
+ * meshcore-sniffer: built-in web dashboard.
  *
  * Single-threaded TCP listener that accepts HTTP/1.1 connections.
  * GET /events upgrades to SSE; the socket is kept and registered in
@@ -21,6 +21,7 @@
 #include "cot.h"
 #include "keyset.h"
 #include "options.h"
+#include "db_sqlite.h"
 
 extern keyset_t *app_get_keyset(void);
 extern int       app_add_runtime_extra_freq(uint64_t f_hz, int bw_hz, int sf, int cr);
@@ -35,10 +36,13 @@ extern int       app_add_runtime_extra_freq(uint64_t f_hz, int bw_hz, int sf, in
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_SSE_CLIENTS    8
 #define HISTORY_RING_SIZE  1024  /* recent events replayed to new SSE clients */
+#define API_MESSAGES_DEFAULT_LIMIT 100  /* GET /api/messages default row count */
+#define API_MESSAGES_MAX_LIMIT     500  /* GET /api/messages hard cap */
 
 static int  g_listen_fd = -1;
 static int  g_sse_fds[MAX_SSE_CLIENTS];
@@ -64,7 +68,7 @@ static int g_history_count = 0;  /* total entries currently stored, capped */
 static const char DASHBOARD_HTML[] =
 "<!doctype html>\n"
 "<html><head><meta charset=\"utf-8\">\n"
-"<title>meshtastic-sniffer</title>\n"
+"<title>meshcore-sniffer</title>\n"
 "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">\n"
 "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>\n"
 "<style>\n"
@@ -108,6 +112,27 @@ static const char DASHBOARD_HTML[] =
 "html.light button.promote:hover{background:#bae6fd}\n"
 ".atak{color:#f472b6}\n"
 ".muted{color:#64748b}\n"
+"#analyzertbl{table-layout:fixed;width:100%}\n"
+"#analyzertbl td.hex{font-family:monospace;font-size:11px;word-break:break-all;white-space:normal}\n"
+"#analyzertbl td.mctype{color:#38bdf8;white-space:nowrap}\n"
+"#analyzertbl td.ts{white-space:nowrap;color:#64748b}\n"
+"#analyzertbl td.aexp{width:16px;cursor:pointer;color:#64748b;text-align:center}\n"
+"tr.analyzer-row{cursor:pointer}\n"
+"tr.analyzer-row:hover{background:#1e293b}\n"
+"html.light tr.analyzer-row:hover{background:#e2e8f0}\n"
+"tr.analyzer-detail td{background:#0b1220;padding:8px 12px}\n"
+"html.light tr.analyzer-detail td{background:#f1f5f9}\n"
+".analyzer-detail-tbl{width:100%;border-collapse:collapse;font-size:11px}\n"
+".analyzer-detail-tbl td{padding:2px 8px 2px 0;vertical-align:top;border:none}\n"
+".analyzer-detail-tbl td.k{color:#64748b;white-space:nowrap;width:1%}\n"
+".analyzer-detail-tbl td.v{font-family:monospace;word-break:break-all}\n"
+".analyzer-detail-tbl td.vmuted{font-family:monospace;word-break:break-all;color:#64748b}\n"
+".crc-badge{border-radius:3px;padding:1px 6px;font-size:10px;font-weight:600}\n"
+".crc-badge.crc-ok{background:#064e3b;color:#6ee7b7}\n"
+".crc-badge.crc-corrected{background:#78350f;color:#fcd34d}\n"
+".crc-badge.crc-fail{background:#450a0a;color:#fca5a5}\n"
+".btn-mini{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px;margin-left:6px}\n"
+"html.light .btn-mini{background:#e2e8f0;color:#334155;border-color:#cbd5e1}\n"
 ".log-item{padding:5px 0;border-bottom:1px dotted #1e293b;font-size:12px;line-height:1.5;word-wrap:break-word}\n"
 ".log-item .ts{color:#64748b;font-size:11px;margin-right:6px}\n"
 ".log-item b{color:#38bdf8}\n"
@@ -116,10 +141,11 @@ static const char DASHBOARD_HTML[] =
 ".snr-up   {color:#4ade80}\n"
 ".snr-down {color:#f87171}\n"
 ".snr-flat {color:#64748b}\n"
-/* Config + Activity tabs are plain block content -- override the
+/* Config tab is plain block content -- override the
  * .tab.active{display:flex} that's right for Live.
  * Topology tab uses a flex column so the canvas can fill the pane. */
-"#config.tab.active,#activity.tab.active{display:block}\n"
+"#config.tab.active{display:block}\n"
+"#stats.tab.active{display:block}\n"
 "#topology.tab.active{display:flex;flex-direction:column}\n"
 "#topology{position:relative;overflow:hidden}\n"
 "#topo-canvas{flex:1;display:block;width:100%;background:#0f172a;cursor:default}\n"
@@ -127,45 +153,75 @@ static const char DASHBOARD_HTML[] =
 "#topo-empty{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:480px;text-align:center;pointer-events:none;z-index:5}\n"
 "#topo-legend{position:absolute;left:10px;top:10px;color:#64748b;font-size:11px;background:rgba(15,23,42,0.85);padding:7px 11px;border-radius:3px;border:1px solid #334155;z-index:4;pointer-events:none}\n"
 "#topo-legend .l-node{display:inline-block;width:8px;height:8px;border-radius:50%;background:#38bdf8;vertical-align:middle;margin-right:3px}\n"
+"#topo-legend .l-repeater{display:inline-block;width:8px;height:8px;background:#38bdf8;vertical-align:middle;margin-right:3px}\n"
 "#topo-legend .l-edge{display:inline-block;width:14px;height:1px;background:#94a3b8;vertical-align:middle;margin-right:3px}\n"
+"#topo-legend .l-relay{display:inline-block;width:14px;height:3px;background:#4ade80;vertical-align:middle;margin-right:3px}\n"
 "html.light #topo-canvas{background:#ffffff}\n"
 "html.light #topo-legend{background:rgba(255,255,255,0.92);color:#475569;border-color:#cbd5e1}\n"
-/* Activity tab: per-channel cards in a responsive grid.              */
-"#activity{padding:14px;overflow:auto}\n"
-"#activity-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}\n"
+/* Channels tab: list of channels on the left, message log (with
+ * per-message routing path) for the selected channel on the right.
+ * The base .tab.active{display:flex} rule already gives a flex row,
+ * so the two panes split side by side with no extra override. */
+"#channels-list-pane{width:340px;flex-shrink:0}\n"
+/* Add-by-hashtag control (no key needed) at the top of the channel
+ * list -- mirrors the Config tab's textarea/input/button/.hint
+ * styling (#config rules below) so it doesn't look like a bare
+ * unstyled browser form. */
+"#channels-list-pane .row{margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}\n"
+"#channels-list-pane input[type=text]{flex:1;min-width:120px;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:3px;padding:7px 10px;font-family:'SF Mono',Consolas,monospace;font-size:13px}\n"
+"#channels-list-pane input[type=text]:focus{outline:none;border-color:#38bdf8}\n"
+"#channels-list-pane button{background:#0c4a6e;color:#bae6fd;border:1px solid #0284c7;border-radius:3px;padding:7px 16px;cursor:pointer;font-size:13px;font-weight:500}\n"
+"#channels-list-pane button:hover{background:#075985;color:#e0f2fe}\n"
+"#channels-list-pane button:disabled{opacity:0.6;cursor:default}\n"
+"#channels-list-pane .hint{color:#64748b;font-size:12px}\n"
+"html.light #channels-list-pane input[type=text]{background:#ffffff;color:#1e293b;border-color:#cbd5e1}\n"
+"html.light #channels-list-pane input[type=text]:focus{border-color:#0284c7}\n"
+"html.light #channels-list-pane button{background:#e0f2fe;color:#0c4a6e;border-color:#0284c7}\n"
+"html.light #channels-list-pane button:hover{background:#bae6fd}\n"
+"html.light #channels-list-pane .hint{color:#94a3b8}\n"
+"#channels-msgs-pane{flex:1;min-width:0;display:flex;flex-direction:column}\n"
+"tr.chan-row{cursor:pointer}\n"
+"tr.chan-row.selected td{background:#1e3a5f}\n"
+"html.light tr.chan-row.selected td{background:#dbeafe}\n"
+/* Channel messages rendered as a chat log: one bubble per message,
+ * newest first (matches the existing "load older" pagination, which
+ * appends further back in time). */
+"#chantab-msgs.chat-log{display:flex;flex-direction:column;gap:10px;padding:4px 2px}\n"
+"#chantab-msgs .chat-msg{display:flex}\n"
+"#chantab-msgs .chat-msg.side-b{justify-content:flex-end}\n"
+"#chantab-msgs .chat-col{display:flex;flex-direction:column;max-width:min(560px,78%)}\n"
+"#chantab-msgs .chat-msg.side-b .chat-col{align-items:flex-end}\n"
+"#chantab-msgs .chat-meta{font-size:11px;color:#64748b;margin-bottom:3px}\n"
+"#chantab-msgs .chat-meta b{color:#38bdf8;font-weight:600}\n"
+"#chantab-msgs .chat-msg.side-b .chat-meta b{color:#4ade80}\n"
+"#chantab-msgs .chat-bubble{background:#1e293b;border-radius:12px;padding:8px 12px;font-size:13px;line-height:1.4;word-wrap:break-word;white-space:pre-wrap;display:inline-block}\n"
+"#chantab-msgs .chat-msg.side-b .chat-bubble{background:#1e3a5f}\n"
+"#chantab-msgs .chat-foot{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:11px;color:#64748b}\n"
+"#chantab-msgs .chat-path{font-family:'SF Mono',Consolas,monospace;color:#94a3b8;word-break:break-all}\n"
+"html.light #chantab-msgs .chat-bubble{background:#e2e8f0;color:#1e293b}\n"
+"html.light #chantab-msgs .chat-msg.side-b .chat-bubble{background:#dbeafe}\n"
+"html.light #chantab-msgs .chat-msg.side-b .chat-meta b{color:#0284c7}\n"
+"html.light #chantab-msgs .chat-meta,html.light #chantab-msgs .chat-foot{color:#94a3b8}\n"
+"html.light #chantab-msgs .chat-path{color:#64748b}\n"
 ".empty-hint{color:#64748b;font-size:13px;padding:24px 4px;text-align:center;font-style:italic}\n"
-".chan-card{background:#1e293b;border:1px solid #334155;border-radius:5px;padding:12px 14px;display:flex;flex-direction:column;gap:7px;transition:border-color 0.2s}\n"
-".chan-card.hot{border-color:#38bdf8}\n"
-".chan-card.dead{opacity:0.55}\n"
-".chan-card .top{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}\n"
-".chan-card .nm{font-size:15px;font-weight:600;color:#f8fafc;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n"
-".chan-card .ph{color:#64748b;font-size:11px;font-family:'SF Mono',Consolas,monospace}\n"
-".chan-card .preset{color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:0.5px}\n"
-".chan-card .row2{display:flex;gap:16px;font-size:12px}\n"
-".chan-card .row2 .lbl{color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;display:block}\n"
-".chan-card .row2 .v{color:#38bdf8;font-weight:600;font-variant-numeric:tabular-nums;font-size:15px}\n"
-".chan-card canvas{display:block;width:100%;height:36px;background:#0f172a;border-radius:3px}\n"
-".chan-card .last{color:#64748b;font-size:11px}\n"
-".chan-card .ch-list{margin-top:2px;display:flex;flex-direction:column;gap:3px}\n"
-".chan-card .ch-row{display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;padding:3px 6px;border-radius:3px;background:#0f172a}\n"
-".chan-card .ch-row .ch-nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:8px}\n"
-".chan-card .ch-row .ch-stats{color:#64748b;font-variant-numeric:tabular-nums;font-size:11px;white-space:nowrap}\n"
-".chan-card .ch-row.locked{color:#fb923c}\n"
-"html.light .chan-card .ch-row{background:#f8fafc;color:#475569}\n"
-"html.light .chan-card .ch-row.locked{color:#c2410c}\n"
-"html.light .chan-card{background:#ffffff;border-color:#e2e8f0}\n"
-"html.light .chan-card.hot{border-color:#0284c7}\n"
-"html.light .chan-card .nm{color:#0f172a}\n"
-"html.light .chan-card .ph{color:#94a3b8}\n"
-"html.light .chan-card .preset{color:#64748b}\n"
-"html.light .chan-card .row2 .lbl{color:#94a3b8}\n"
-"html.light .chan-card .row2 .v{color:#0284c7}\n"
-"html.light .chan-card canvas{background:#f1f5f9}\n"
-"html.light .chan-card .last{color:#94a3b8}\n"
 "html.light .empty-hint{color:#94a3b8}\n"
 "#config{padding:18px;overflow:auto;max-width:820px;width:100%}\n"
 "#config h3{margin:18px 0 6px 0;font-size:12px;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;font-weight:600;border-bottom:1px solid #334155;padding-bottom:4px}\n"
 "#config h3:first-child{margin-top:0}\n"
+/* Statistics tab: filter row + up to 3 cards (2 donuts + 1 CRC bar). */
+"#stats{padding:18px;overflow:auto;width:100%}\n"
+"#stats h3{margin:0 0 10px 0;font-size:12px;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;font-weight:600;border-bottom:1px solid #334155;padding-bottom:4px}\n"
+"#stats-filter.row{display:flex;gap:8px;margin-bottom:14px}\n"
+".stats-window-btn.active{background:#0c4a6e;color:#bae6fd;border-color:#0284c7}\n"
+"#stats-charts{display:flex;flex-wrap:wrap;gap:16px}\n"
+".stats-card{background:#1e293b;border-radius:4px;padding:14px;flex:1;min-width:280px}\n"
+".stats-chart-row{display:flex;align-items:center;gap:16px}\n"
+".donut-wrap svg{display:block}\n"
+".chart-legend{font-size:12px;line-height:1.7}\n"
+".chart-legend .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}\n"
+".chart-legend .cnt{color:#64748b;margin-left:4px}\n"
+"#stats-crcbar{display:flex;height:22px;border-radius:3px;overflow:hidden;margin:8px 0}\n"
+".stats-table{margin-top:10px;width:100%}\n"
 "#config textarea,#config input[type=text]{width:100%;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:3px;padding:8px 10px;font-family:'SF Mono',Consolas,monospace;font-size:13px}\n"
 "#config textarea:focus,#config input[type=text]:focus{outline:none;border-color:#38bdf8}\n"
 "#config button{background:#0c4a6e;color:#bae6fd;border:1px solid #0284c7;border-radius:3px;padding:7px 16px;cursor:pointer;margin-top:6px;margin-right:8px;font-size:13px;font-weight:500}\n"
@@ -203,6 +259,10 @@ static const char DASHBOARD_HTML[] =
 "html.light .grid{background:#cbd5e1}\n"
 "html.light .leaflet-container{background:#f8fafc}\n"
 "html.light #config h3{color:#0284c7;border-bottom-color:#e2e8f0}\n"
+"html.light #stats h3{color:#0284c7;border-bottom-color:#e2e8f0}\n"
+"html.light .stats-card{background:#f1f5f9}\n"
+"html.light .stats-window-btn.active{background:#e0f2fe;color:#0c4a6e;border-color:#0284c7}\n"
+"html.light .chart-legend .cnt{color:#94a3b8}\n"
 "html.light #config textarea,html.light #config input[type=text]{background:#ffffff;color:#1e293b;border-color:#cbd5e1}\n"
 "html.light #config textarea:focus,html.light #config input[type=text]:focus{border-color:#0284c7}\n"
 "html.light #config button{background:#e0f2fe;color:#0c4a6e;border-color:#0284c7}\n"
@@ -258,7 +318,7 @@ static const char DASHBOARD_HTML[] =
 "html.light #drawer-msgs .item{border-bottom-color:#e2e8f0}\n"
 "</style></head><body>\n"
 "<div id=\"bar\">\n"
-"  <span class=\"title\">meshtastic-sniffer</span>\n"
+"  <span class=\"title\">meshcore-sniffer</span>\n"
 "  <span class=\"stat\">Rate <span id=\"st-msps\" class=\"val\">--</span> Msps</span>\n"
 "  <span class=\"stat\">Frames <span id=\"st-frames\" class=\"val\">0</span></span>\n"
 "  <span class=\"stat\">Decrypted <span id=\"st-decrypted\" class=\"val\">0</span></span>\n"
@@ -270,9 +330,11 @@ static const char DASHBOARD_HTML[] =
 "</div>\n"
 "<div id=\"tabs\">\n"
 "  <button id=\"tab-live\" class=\"active\" onclick=\"showTab('live')\">Live</button>\n"
-"  <button id=\"tab-activity\" onclick=\"showTab('activity')\">Activity</button>\n"
+"  <button id=\"tab-channelstab\" onclick=\"showTab('channelstab')\">Channels</button>\n"
 "  <button id=\"tab-topology\" onclick=\"showTab('topology')\">Topology</button>\n"
 "  <button id=\"tab-config\" onclick=\"showTab('config')\">Config</button>\n"
+"  <button id=\"tab-stats\" onclick=\"showTab('stats')\">Statistics</button>\n"
+"  <button id=\"tab-analyzer\" onclick=\"showTab('analyzer')\">Analyzer</button>\n"
 "</div>\n"
 "<div id=\"live\" class=\"tab active\">\n"
 "  <div class=\"grid\">\n"
@@ -290,53 +352,84 @@ static const char DASHBOARD_HTML[] =
 "        <tbody></tbody>\n"
 "      </table>\n"
 "    </div>\n"
-"    <div class=\"pane\"><h2>Channels <span class=muted>(by hash)</span></h2><table id=\"channels\"><thead><tr><th>Hash</th><th>Name</th><th>Preset</th><th>Frames</th><th>Decrypt</th><th>Slots</th><th>SNR (1h)</th><th>Last</th></tr></thead><tbody></tbody></table></div>\n"
+"    <div class=\"pane\"><h2>Channels <span class=muted>(by hash)</span></h2><table id=\"channels\"><thead><tr><th>Hash</th><th>Name</th><th>Preset</th><th>Frames</th><th>Decrypt</th><th>Slots</th><th>SNR (24h)</th><th>Last</th></tr></thead><tbody></tbody></table></div>\n"
 "    <div class=\"pane\"><h2>Messages</h2><div id=\"msgs\"></div></div>\n"
 "    <div class=\"pane\"><h2>Discoveries &amp; ATAK</h2><div id=\"disc\"></div></div>\n"
 "  </div>\n"
 "</div>\n"
-"<div id=\"activity\" class=\"tab\">\n"
-"  <div id=\"activity-empty\" class=\"empty-hint\">Waiting for packets... channels light up as frames arrive.</div>\n"
-"  <div id=\"activity-grid\"></div>\n"
+"<div id=\"channelstab\" class=\"tab\">\n"
+"  <div class=\"pane\" id=\"channels-list-pane\"><h2>Channels <span class=muted id=\"chantab-count\"></span></h2>\n"
+"    <div class=\"row\"><input id=\"chantab-hashtag-input\" type=\"text\" placeholder=\"channel name (no key needed)\"><button id=\"chantab-hashtag-btn\" onclick=\"addHashtagChannel()\">Add</button> <span id=\"chantab-hashtag-status\" class=\"hint\"></span></div>\n"
+"    <table id=\"chantab-list\"><thead><tr><th>Hash</th><th>Name</th><th>Protocol</th><th>Frames</th><th>Last</th></tr></thead><tbody></tbody></table>\n"
+"    <div id=\"chantab-empty\" class=\"empty-hint\">Waiting for packets... channels appear as frames arrive.</div>\n"
+"  </div>\n"
+"  <div class=\"pane\" id=\"channels-msgs-pane\"><h2 id=\"chantab-msgs-title\">Messages <span class=muted>select a channel</span></h2>\n"
+"    <div id=\"chantab-msgs\" class=\"chat-log\"></div>\n"
+"    <div id=\"chantab-msgs-empty\" class=\"empty-hint\">Select a channel on the left to see its messages.</div>\n"
+"    <div id=\"chantab-msgs-loadolder-wrap\" style=\"display:none\"><button id=\"chantab-msgs-loadolder\" class=\"btn-mini\">Load older messages</button> <span id=\"chantab-msgs-loadolder-status\" class=\"muted\"></span></div>\n"
+"  </div>\n"
 "</div>\n"
 "<div id=\"topology\" class=\"tab\">\n"
 "  <div id=\"topo-empty\" class=\"empty-hint\">Waiting for the first frame... nodes appear as soon as the sniffer hears them, and link up via NEIGHBORINFO and relay-hop hints.</div>\n"
-"  <div id=\"topo-legend\"><span class=l-node></span> node, size = frames seen &nbsp;|&nbsp; <span class=l-edge></span> edge = observed RX, color = SNR &nbsp;|&nbsp; click a node to inspect</div>\n"
+"  <div id=\"topo-legend\"><span class=l-node></span> node, size = frames seen &nbsp;|&nbsp; <span class=l-repeater></span> repeater/room/sensor &nbsp;|&nbsp; <span class=l-edge></span> observed RX, color = SNR &nbsp;|&nbsp; <span class=l-relay></span> relay path, width = exchange count, radiates outward by hop-distance &nbsp;|&nbsp; click a node to inspect<span id=\"topo-relay-stats\"></span></div>\n"
 "  <canvas id=\"topo-canvas\"></canvas>\n"
 "</div>\n"
 "<div id=\"config\" class=\"tab\">\n"
-"  <h3>Add keys</h3>\n"
+"  <h3>Add MeshCore channel</h3>\n"
 "  <div class=\"row\">\n"
-"    <textarea id=\"keys-input\" rows=\"4\" placeholder=\"LongFast=default&#10;Ops=hex:00112233445566778899aabbccddeeff&#10;Crew=base64:AQ==\"></textarea>\n"
-"    <button onclick=\"postKeys()\">Add</button>\n"
-"    <span id=\"keys-status\" class=\"hint\"></span>\n"
-"    <div class=\"hint\">One spec per line. ChannelName=SPEC (recommended) or bare SPEC. SPEC: default | simple0..10 | hex:... | base64:...</div>\n"
-"  </div>\n"
-"  <h3>Channel-share URL</h3>\n"
-"  <div class=\"row\">\n"
-"    <input id=\"share-input\" type=\"text\" placeholder=\"https://meshtastic.org/e/#...\">\n"
-"    <button onclick=\"postShare()\">Add channel from URL</button>\n"
-"    <span id=\"share-status\" class=\"hint\"></span>\n"
-"    <div class=\"hint\">Paste the meshtastic.org/e/ link from a channel-share QR code. Decoded protobuf is added to the keyset.</div>\n"
-"  </div>\n"
-"  <h3>Add extra frequency</h3>\n"
-"  <div class=\"row\">\n"
-"    <input id=\"freq-input\" type=\"text\" placeholder=\"915183000:bw=250000:sf=11:cr=5\">\n"
-"    <button onclick=\"postFreq()\">Add</button>\n"
-"    <span id=\"freq-status\" class=\"hint\"></span>\n"
-"    <div class=\"hint\">HZ:bw=BW:sf=SF:cr=CR -- promote an off-grid sighting or any custom freq to a real decoder slot.</div>\n"
-"  </div>\n"
-"  <h3>CoT multicast</h3>\n"
-"  <div class=\"row\">\n"
-"    <input id=\"cot-input\" type=\"text\" placeholder=\"239.2.3.1:6969 (empty to disable)\">\n"
-"    <button onclick=\"postCot()\">Apply</button>\n"
-"    <span id=\"cot-status\" class=\"hint\"></span>\n"
-"    <div class=\"hint\">Republish positioned nodes (POSITION + ATAK PLI) as CoT XML to a multicast group. ATAK-CIV / WinTAK / iTAK on the same LAN pick them up automatically.</div>\n"
+"    <textarea id=\"mc-channel-input\" rows=\"2\" placeholder=\"test&#10;Ops:izOH6cXN6mrJ5e26oRXNcg==\"></textarea>\n"
+"    <button onclick=\"postMeshcoreChannel()\">Add</button>\n"
+"    <span id=\"mc-channel-status\" class=\"hint\"></span>\n"
+"    <div class=\"hint\">MeshCore has no numbered channels like Meshtastic -- group traffic is tagged only by a 1-byte hash of the shared secret. One spec per line, two forms: a bare Name (or #Name) joins a public hashtag channel exactly like the app's 'Add Channel' -- the secret is derived from the name, no key needed. Name:SECRET joins a private channel using an explicit hex (32/64 chars) or base64 secret someone shared with you. The default 'Public' channel is pre-loaded.</div>\n"
+"    <div id=\"mc-channel-list\"></div>\n"
+"    <div class=\"hint\">Remembered in this browser (localStorage) and re-added automatically on page load, since the sniffer itself forgets added channels on restart. \"Remove\" only forgets it here -- the sniffer keeps decrypting with it until restart.</div>\n"
 "  </div>\n"
 "  <h3>View options</h3>\n"
 "  <div class=\"row\">\n"
 "    <label><input type=\"checkbox\" id=\"showUntrusted\"> Show untrusted frames (CRC-fail or no-decrypt) in map / nodes / channels</label>\n"
 "    <div class=\"hint\">Off by default. Frames without verified bytes (e.g. cross-slot phantoms of a real TX, or noise patterns that passed the 5-bit header checksum by chance) decode to corrupted from/to/packet_id fields. Surfacing them invents nodes that don't exist. Turn this on for diagnostic inspection of what the demod produced before trust filtering.</div>\n"
+"  </div>\n"
+"</div>\n"
+"<div id=\"stats\" class=\"tab\">\n"
+"  <div class=\"pane\" style=\"width:100%\">\n"
+"    <h2>Statistics <span class=muted>MeshCore traffic, filtered by time window</span></h2>\n"
+"    <div id=\"stats-filter\" class=\"row\">\n"
+"      <button class=\"btn-mini stats-window-btn active\" data-window=\"24h\">24h</button>\n"
+"      <button class=\"btn-mini stats-window-btn\" data-window=\"1w\">1 week</button>\n"
+"      <button class=\"btn-mini stats-window-btn\" data-window=\"1m\">1 month</button>\n"
+"    </div>\n"
+"    <div id=\"stats-charts\">\n"
+"      <div class=\"stats-card\" id=\"stats-card-type\">\n"
+"        <h3>Message type</h3>\n"
+"        <div class=\"stats-chart-row\">\n"
+"          <div id=\"stats-donut-type\" class=\"donut-wrap\"></div>\n"
+"          <div id=\"stats-legend-type\" class=\"chart-legend\"></div>\n"
+"        </div>\n"
+"        <button class=\"btn-mini stats-table-toggle\" data-target=\"type\">View as table</button>\n"
+"        <table class=\"stats-table\" id=\"stats-table-type\" style=\"display:none\"><thead><tr><th>Type</th><th>Count</th><th>%</th></tr></thead><tbody></tbody></table>\n"
+"      </div>\n"
+"      <div class=\"stats-card\" id=\"stats-card-channel\">\n"
+"        <h3>Channel</h3>\n"
+"        <div class=\"stats-chart-row\">\n"
+"          <div id=\"stats-donut-channel\" class=\"donut-wrap\"></div>\n"
+"          <div id=\"stats-legend-channel\" class=\"chart-legend\"></div>\n"
+"        </div>\n"
+"        <button class=\"btn-mini stats-table-toggle\" data-target=\"channel\">View as table</button>\n"
+"        <table class=\"stats-table\" id=\"stats-table-channel\" style=\"display:none\"><thead><tr><th>Channel</th><th>Count</th><th>%</th></tr></thead><tbody></tbody></table>\n"
+"      </div>\n"
+"      <div class=\"stats-card\" id=\"stats-card-crc\">\n"
+"        <h3>CRC ratio</h3>\n"
+"        <div id=\"stats-crcbar\"></div>\n"
+"        <div id=\"stats-legend-crc\" class=\"chart-legend\"></div>\n"
+"      </div>\n"
+"    </div>\n"
+"    <div id=\"stats-empty\" class=\"empty-hint\" style=\"display:none\">No MeshCore events with SQLite persistence in this window.</div>\n"
+"  </div>\n"
+"</div>\n"
+"<div id=\"analyzer\" class=\"tab\">\n"
+"  <div class=\"pane\"><h2>Analyzer <span class=muted>decoded frames, all protocols -- click a row to inspect</span> <button onclick=\"clearAnalyzer()\" style=\"background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:10px;\">Clear</button></h2>\n"
+"    <table id=\"analyzertbl\"><thead><tr><th></th><th>Time</th><th>Type</th><th>CRC</th><th>Frame (hex)</th></tr></thead><tbody></tbody></table>\n"
+"    <div id=\"analyzer-empty\" class=\"empty-hint\">Waiting for frames...</div>\n"
 "  </div>\n"
 "</div>\n"
 "<aside id=\"drawer\" aria-hidden=\"true\">\n"
@@ -358,7 +451,7 @@ static const char DASHBOARD_HTML[] =
 "</aside>\n"
 "<script>\n"
 "function showTab(name){\n"
-"  for(const t of ['live','activity','topology','config']){\n"
+"  for(const t of ['live','channelstab','topology','config','stats','analyzer']){\n"
 "    document.getElementById(t).classList.toggle('active',t===name);\n"
 "    document.getElementById('tab-'+t).classList.toggle('active',t===name);\n"
 "  }\n"
@@ -367,7 +460,8 @@ static const char DASHBOARD_HTML[] =
 "   * switch -- user re-opens by clicking a row in the new tab. */\n"
 "  if (drawerNodeId) closeDrawer();\n"
 "  if (name==='live') setTimeout(()=>map.invalidateSize(),60);\n"
-"  if (name==='activity') renderActivity();\n"
+"  if (name==='channelstab') refreshChannelsTab();\n"
+"  if (name==='stats') fetchStats();\n"
 "  if (name==='topology') topoStart(); else topoStop();\n"
 "}\n"
 "// Theme toggle: dark is default, light persists in localStorage. Map\n"
@@ -398,6 +492,11 @@ static const char DASHBOARD_HTML[] =
 "  } catch (err) { btn.textContent = 'error'; btn.disabled = false; }\n"
 "});\n"
 "const chTbody = document.querySelector('#channels tbody');\n"
+"const analyzerTbody = document.querySelector('#analyzertbl tbody');\n"
+"const analyzerEmpty = document.getElementById('analyzer-empty');\n"
+"const DEBUG_MAX = 500;\n"
+"let analyzerSeq = 0;\n"
+"const analyzerEvents = {};\n"
 /* Per-slot rolling SNR history, keyed by physical slot id. Filled from
  * CHAN_SNR SSE events; renderChannels() averages buckets across the
  * slots that map to each channel hash. */
@@ -452,7 +551,7 @@ static const char DASHBOARD_HTML[] =
 "  requestAnimationFrame(()=>{ nodesRafQueued = false; renderNodes(); });\n"
 "}\n"
 "function renderNodes(){\n"
-"  const all = Object.keys(nodes);\n"
+"  const all = Object.keys(nodes).filter(id=>!nodes[id].synthetic);\n"
 "  const matched = nodesQuery ? all.filter(id=>nodesMatches(id, nodes[id])) : all;\n"
 "  matched.sort(nodesCmp);\n"
 "  // Cap rendered rows -- the table pane scrolls but rendering 5000 rows\n"
@@ -625,30 +724,34 @@ static const char DASHBOARD_HTML[] =
 "  channelsRafQueued = true;\n"
 "  requestAnimationFrame(()=>{ channelsRafQueued = false; renderChannels(); });\n"
 "}\n"
-/* aggregateSnr -- collapse per-slot rings into one 60-bucket view for
- * the channel hash (which can span multiple physical slots). Each
- * bucket is the mean across slots that had data in that minute. */
+/* aggregateSnr -- collapse per-slot rings into one SNR_BUCKETS-bucket view
+ * for the channel hash (which can span multiple physical slots). Each
+ * bucket is the mean across slots that had data in that window. */
+"const SNR_BUCKETS = 288;\n"
+"const SNR_BUCKET_MINUTES = 5;\n"
 "function aggregateSnr(slotSet){\n"
-"  const out = new Array(60).fill(null);\n"
-"  const sum = new Array(60).fill(0);\n"
-"  const cnt = new Array(60).fill(0);\n"
+"  const out = new Array(SNR_BUCKETS).fill(null);\n"
+"  const sum = new Array(SNR_BUCKETS).fill(0);\n"
+"  const cnt = new Array(SNR_BUCKETS).fill(0);\n"
 "  if (!slotSet) return out;\n"
 "  for (const slot of slotSet){\n"
 "    const ring = chanSnr[slot];\n"
 "    if (!ring) continue;\n"
-"    for (let i=0; i<60 && i<ring.length; i++){\n"
+"    for (let i=0; i<SNR_BUCKETS && i<ring.length; i++){\n"
 "      if (ring[i] >= 0){ sum[i] += ring[i]; cnt[i] += 1; }\n"
 "    }\n"
 "  }\n"
-"  for (let i=0; i<60; i++) if (cnt[i]) out[i] = sum[i]/cnt[i];\n"
+"  for (let i=0; i<SNR_BUCKETS; i++) if (cnt[i]) out[i] = sum[i]/cnt[i];\n"
 "  return out;\n"
 "}\n"
-/* snrSummary -- compress the 60-bucket history into one cell:
- *   current = newest populated minute (rounded dB)
+/* snrSummary -- compress the SNR_BUCKETS-bucket history into one cell:
+ *   current = newest populated bucket (rounded dB)
  *   trend   = least-squares slope over up to 10 most-recent populated
- *             buckets. slope > +0.5 dB/min = up, < -0.5 = down, else
- *             flat. Returns null when nothing populated so the cell
- *             shows '--' instead of confusing zeros. */
+ *             buckets, normalized to dB/min (slope is computed in
+ *             dB-per-bucket-step, so divide by SNR_BUCKET_MINUTES).
+ *             slope > +0.5 dB/min = up, < -0.5 = down, else flat.
+ *             Returns null when nothing populated so the cell shows
+ *             '--' instead of confusing zeros. */
 "function snrSummary(buckets){\n"
 "  let current = null, currentIdx = -1;\n"
 "  for (let i = buckets.length - 1; i >= 0; i--){\n"
@@ -667,8 +770,9 @@ static const char DASHBOARD_HTML[] =
 "    let num = 0, den = 0;\n"
 "    for (let i = 0; i < n; i++){ const dx = xs[i]-mx; num += dx*(ys[i]-my); den += dx*dx; }\n"
 "    const slope = den ? num/den : 0;\n"
-"    if (slope >  0.5) trend = 'up';\n"
-"    else if (slope < -0.5) trend = 'down';\n"
+"    const slopePerMin = slope / SNR_BUCKET_MINUTES;\n"
+"    if (slopePerMin >  0.5) trend = 'up';\n"
+"    else if (slopePerMin < -0.5) trend = 'down';\n"
 "  }\n"
 "  return { current: Math.round(current), trend };\n"
 "}\n"
@@ -682,7 +786,9 @@ static const char DASHBOARD_HTML[] =
 "    // not the operator's name for the channel -- show '(encrypted)'\n"
 "    // rather than a cryptic '?'.\n"
 "    const name = c.name || '<span class=muted>(encrypted)</span>';\n"
-"    const preset = c.preset || '<span class=muted>--</span>';\n"
+"    // MeshCore has no SF/BW/CR-named preset like Meshtastic -- say so\n"
+"    // plainly instead of a bare '--' that reads as missing data.\n"
+"    const preset = c.protocol === 'meshcore' ? '<span class=muted>MeshCore</span>' : (c.preset || '<span class=muted>--</span>');\n"
 "    const dec = c.total ? Math.round(100*c.decrypted/c.total) : 0;\n"
 "    const decCell = c.decrypted>0 ? `${c.decrypted}/${c.total} (${dec}%)` : `<span class=muted>0/${c.total}</span>`;\n"
 "    const slotN = c.slots ? c.slots.size : 0;\n"
@@ -697,7 +803,7 @@ static const char DASHBOARD_HTML[] =
 "}\n"
 "function exportCsv(){\n"
 "  const rows = [['node_id','name','lat','lon','last_snr_db','last_seen']];\n"
-"  for (const id of Object.keys(nodes)){const n=nodes[id];\n"
+"  for (const id of Object.keys(nodes)){const n=nodes[id]; if (n.synthetic) continue;\n"
 "    const ll = (markers[id] && markers[id].getLatLng) ? markers[id].getLatLng() : null;\n"
 "    rows.push([id, (n.name||'').replace(/,/g,';'), ll?ll.lat.toFixed(7):'', ll?ll.lng.toFixed(7):'', n.snr_db!==undefined?n.snr_db.toFixed(1):'', new Date(n.ts*1000).toISOString()]);\n"
 "  }\n"
@@ -713,12 +819,217 @@ static const char DASHBOARD_HTML[] =
 "  el.insertBefore(div, el.firstChild);\n"
 "  while (el.children.length>200) el.removeChild(el.lastChild);\n"
 "}\n"
+/* Analyzer tab: one row per received frame (either protocol), newest
+ * first, capped at DEBUG_MAX rows so an active channel doesn't grow the
+ * DOM forever. Each row expands in place (click to toggle) into a
+ * structured field breakdown built from the same JSON the row itself
+ * came from -- kept in analyzerEvents, pruned in lockstep with the DOM
+ * so an old row falling off the cap also drops its stored event. */
+"function analyzerCrcBadge(p){\n"
+"  if (p.payload_crc_ok === undefined) return '<span class=muted>--</span>';\n"
+"  if (!p.payload_crc_ok) return '<span class=\"crc-badge crc-fail\">fail</span>';\n"
+"  return p.crc_corrected ? '<span class=\"crc-badge crc-corrected\" title=\"Recovered via single-bit brute-force\">corrected</span>' : '<span class=\"crc-badge crc-ok\">ok</span>';\n"
+"}\n"
+"function noteAnalyzerFrame(p){\n"
+"  analyzerEmpty.style.display = 'none';\n"
+"  const id = ++analyzerSeq;\n"
+"  analyzerEvents[id] = p;\n"
+"  const type = p.mc_type || p.port_name || '';\n"
+"  const tr = document.createElement('tr');\n"
+"  tr.className = 'analyzer-row';\n"
+"  tr.dataset.id = id;\n"
+"  tr.innerHTML = `<td class=aexp>\\u25b8</td><td class=ts>${fmtTime(p.ts)}</td><td class=mctype>${escHtml(type)}</td><td>${analyzerCrcBadge(p)}</td><td class=hex>${escHtml(p.raw_hex||'')}</td>`;\n"
+"  tr.onclick = () => toggleAnalyzerDetail(tr, id);\n"
+"  analyzerTbody.insertBefore(tr, analyzerTbody.firstChild);\n"
+"  const rows = analyzerTbody.querySelectorAll('tr.analyzer-row');\n"
+"  if (rows.length > DEBUG_MAX) {\n"
+"    const last = rows[rows.length-1];\n"
+"    delete analyzerEvents[last.dataset.id];\n"
+"    const next = last.nextSibling;\n"
+"    if (next && next.classList && next.classList.contains('analyzer-detail')) analyzerTbody.removeChild(next);\n"
+"    analyzerTbody.removeChild(last);\n"
+"  }\n"
+"}\n"
+"function toggleAnalyzerDetail(tr, id){\n"
+"  const next = tr.nextSibling;\n"
+"  if (next && next.classList && next.classList.contains('analyzer-detail')) {\n"
+"    tr.querySelector('td.aexp').textContent = '\\u25b8';\n"
+"    analyzerTbody.removeChild(next);\n"
+"    return;\n"
+"  }\n"
+"  document.querySelectorAll('tr.analyzer-detail').forEach(d => d.remove());\n"
+"  document.querySelectorAll('#analyzertbl td.aexp').forEach(e => e.textContent = '\\u25b8');\n"
+"  const p = analyzerEvents[id];\n"
+"  if (!p) return;\n"
+"  tr.querySelector('td.aexp').textContent = '\\u25be';\n"
+"  const detailTr = document.createElement('tr');\n"
+"  detailTr.className = 'analyzer-detail';\n"
+"  const td = document.createElement('td');\n"
+"  td.colSpan = 5;\n"
+"  td.innerHTML = analyzerDetailHtml(p);\n"
+"  detailTr.appendChild(td);\n"
+"  tr.parentNode.insertBefore(detailTr, tr.nextSibling);\n"
+"}\n"
+"// analyzerDetailHtml -- structured field breakdown for one decoded\n"
+"// frame, built entirely from JSON fields the server already emits.\n"
+"// Protocol-specific fields render first with friendly labels; anything\n"
+"// left over (any field not already shown) is dumped generically at the\n"
+"// end so no data is ever silently hidden as the event schema grows.\n"
+"function analyzerDetailHtml(p){\n"
+"  const rows = [];\n"
+"  const shown = new Set(['ts','raw_hex','protocol','mc_type']);\n"
+"  const add = (label, val) => { if (val !== undefined && val !== null && val !== '') rows.push(`<tr><td class=k>${label}</td><td class=v>${val}</td></tr>`); };\n"
+"  if (p.protocol === 'meshcore') {\n"
+"    add('Route type', p.route_type_name !== undefined ? `${p.route_type_name} (${p.route_type})` : undefined);\n"
+"    add('Payload type', p.payload_type !== undefined ? `${p.mc_type} (${p.payload_type})` : undefined);\n"
+"    add('Payload ver', p.payload_ver);\n"
+"    ['route_type','route_type_name','payload_type','payload_ver'].forEach(k=>shown.add(k));\n"
+"    if (p.route_path_hash_count) {\n"
+"      const size = p.route_path_hash_size || 1;\n"
+"      const hex = p.route_path_hex || '';\n"
+"      const hops = [];\n"
+"      for (let i = 0; i < p.route_path_hash_count; i++) hops.push(hex.substr(i*size*2, size*2));\n"
+"      add('Route path', `${hops.join(' \\u2192 ')} <button class=btn-mini onclick=\"drawMessagePath('${hex}',${p.route_path_hash_count},${size})\">Show path</button>`);\n"
+"    }\n"
+"    ['route_path_hex','route_path_hash_count','route_path_hash_size'].forEach(k=>shown.add(k));\n"
+"    if (p.trace_route_hashes_hex) {\n"
+"      const n = p.trace_route_hashes_hex.length / 2;\n"
+"      add('Trace route (planned hops)', `${p.trace_route_hashes_hex} <button class=btn-mini onclick=\"drawMessagePath('${p.trace_route_hashes_hex}',${n},1)\">Show path</button>`);\n"
+"      shown.add('trace_route_hashes_hex');\n"
+"    }\n"
+"    if (p.trace_snrs_hex) { add('Trace SNRs (hex, /4 dB each hop)', p.trace_snrs_hex); shown.add('trace_snrs_hex'); }\n"
+"  } else {\n"
+"    add('Port', p.port_name !== undefined ? `${p.port_name} (${p.portnum})` : undefined);\n"
+"    add('From', p.from); add('To', p.to); add('Packet id', p.packet_id);\n"
+"    add('Hops', (p.hop_start!==undefined && p.hop_limit!==undefined) ? `${p.hop_start-p.hop_limit}/${p.hop_start}` : undefined);\n"
+"    ['port_name','portnum','from','to','packet_id','hop_start','hop_limit'].forEach(k=>shown.add(k));\n"
+"  }\n"
+"  add('Decrypted', p.decrypted === undefined ? undefined : (p.decrypted ? 'yes' : 'no'));\n"
+"  add('CRC', p.payload_crc_ok === undefined ? undefined : (p.payload_crc_ok ? (p.crc_corrected ? 'ok (bit-flip corrected)' : 'ok') : 'FAIL'));\n"
+"  ['decrypted','has_crc','payload_crc_ok','crc_corrected'].forEach(k=>shown.add(k));\n"
+"  if (p.rssi_db !== undefined || p.snr_db !== undefined) {\n"
+"    add('RSSI / SNR', `${p.rssi_db!==undefined?p.rssi_db.toFixed(1)+' dBm':'--'} / ${p.snr_db!==undefined?p.snr_db.toFixed(1)+' dB':'--'}`);\n"
+"  }\n"
+"  ['rssi_db','snr_db'].forEach(k=>shown.add(k));\n"
+"  if (p.sf) add('Radio', `SF${p.sf} CR4/${p.cr} BW${Math.round(p.bw_hz/1000)}kHz${p.freq_hz?' @ '+(p.freq_hz/1e6).toFixed(3)+'MHz':''}`);\n"
+"  ['sf','cr','bw_hz','freq_hz','preset','slot_id'].forEach(k=>shown.add(k));\n"
+"  if (p.channel_name || p.channel_hash !== undefined) {\n"
+"    add('Channel', `${p.channel_name||'<span class=muted>(unknown)</span>'}${p.channel_hash!==undefined?' hash=0x'+p.channel_hash.toString(16):''}`);\n"
+"  }\n"
+"  ['channel_name','channel_hash'].forEach(k=>shown.add(k));\n"
+"  if (p.text) add('Text', escHtml(p.text));\n"
+"  if (p.node_name || p.long_name) add('Node name', escHtml(p.node_name||p.long_name));\n"
+"  ['text','node_name','long_name'].forEach(k=>shown.add(k));\n"
+"  if (p.lat !== undefined && p.lon !== undefined) add('Position', `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`);\n"
+"  ['lat','lon'].forEach(k=>shown.add(k));\n"
+"  if (p.sig_valid !== undefined) add('Sig valid', p.sig_valid ? 'yes' : 'no');\n"
+"  ['sig_valid','station'].forEach(k=>shown.add(k));\n"
+"  const rest = Object.keys(p).filter(k => !shown.has(k) && p[k] !== null && p[k] !== '').sort();\n"
+"  if (rest.length) {\n"
+"    const restStr = rest.map(k => `${k}=${typeof p[k]==='object'?JSON.stringify(p[k]):p[k]}`).join(', ');\n"
+"    rows.push(`<tr><td class=k>Other</td><td class=vmuted>${escHtml(restStr)}</td></tr>`);\n"
+"  }\n"
+"  return `<table class=analyzer-detail-tbl>${rows.join('')}</table>`;\n"
+"}\n"
+"function clearAnalyzer(){\n"
+"  analyzerTbody.replaceChildren();\n"
+"  analyzerEmpty.style.display = '';\n"
+"  for (const k of Object.keys(analyzerEvents)) delete analyzerEvents[k];\n"
+"}\n"
+"// drawMessagePath -- best-effort: resolve each path-hop-hash-hex prefix\n"
+"// against known node ids (a MeshCore path hop hash is literally a\n"
+"// leading-byte prefix of the relaying node's pubkey, matching the same\n"
+"// prefix mc_derive_from_id() uses to build the node's \"!xxxxxxxx\" id --\n"
+"// see Identity::copyHashTo in the upstream firmware). 1-3 byte hashes\n"
+"// can collide between distinct nodes; unresolved hops are reported, not\n"
+"// guessed.\n"
+"function drawMessagePath(hex, hopCount, hashSize){\n"
+"  hashSize = hashSize || 1;\n"
+"  const hops = [];\n"
+"  for (let i = 0; i < hopCount; i++) hops.push(hex.substr(i*hashSize*2, hashSize*2).toLowerCase());\n"
+"  const pts = [];\n"
+"  let resolved = 0;\n"
+"  for (const hop of hops) {\n"
+"    let match = null;\n"
+"    for (const id of Object.keys(nodes)) {\n"
+"      if (id.length === 9 && id.slice(1, 1+hop.length) === hop) { match = id; break; }\n"
+"    }\n"
+"    if (match && markers[match]) { pts.push(markers[match].getLatLng()); resolved++; }\n"
+"  }\n"
+"  if (window.pathLine) { map.removeLayer(window.pathLine); window.pathLine = null; }\n"
+"  if (pts.length < 2) {\n"
+"    alert(`Path: ${resolved}/${hops.length} hop(s) resolved to a known position -- not enough to draw a line.`);\n"
+"    return;\n"
+"  }\n"
+"  window.pathLine = L.polyline(pts, {color:'#f59e0b', weight:3, opacity:0.85, dashArray:'6,4'}).addTo(map);\n"
+"  map.fitBounds(window.pathLine.getBounds(), {padding:[40,40]});\n"
+"  showTab('live');\n"
+"}\n"
 /* msgSummary -- per-port short string for the global Messages pane.
  * Returns null if the event should not appear in the pane (e.g. ATAK
  * which already lands in Discoveries, or unknown ports with no
  * useful summary). Keep each port to one tight line so the log
  * stays readable when 100+ events scroll past. */
+"// Message-row 'from' label. Group traffic (GRP_TXT/GRP_DATA) is keyed by\n"
+"// channel, not a device -- show the channel identity instead of the\n"
+"// synthetic !8000xxxx id. Envelope-only 1:1 traffic (TXT_MSG/REQ/RESPONSE/\n"
+"// PATH) has no real sender identity either -- a passive sniffer only ever\n"
+"// sees the low-entropy dest_hash/src_hash pair, not a stable node id --\n"
+"// so show that pair directly instead of the synthetic !4000xxxx id.\n"
+"// Everything else (including ANON_REQ, keyed off a real pubkey prefix)\n"
+"// falls back to the normal node name/id.\n"
+"function msgFromLabel(p, n, id) {\n"
+"  if (p.protocol === 'meshcore') {\n"
+"    if (p.mc_type === 'GRP_TXT' || p.mc_type === 'GRP_DATA') {\n"
+"      return '#' + (p.channel_name || ('0x' + (p.channel_hash||0).toString(16).padStart(2,'0')));\n"
+"    }\n"
+"    if (p.mc_type === 'TXT_MSG' || p.mc_type === 'REQ' || p.mc_type === 'RESPONSE' || p.mc_type === 'PATH') {\n"
+"      const d = p.dest_hash !== undefined ? '0x'+p.dest_hash.toString(16).padStart(2,'0') : '?';\n"
+"      const s = p.src_hash  !== undefined ? '0x'+p.src_hash.toString(16).padStart(2,'0')  : '?';\n"
+"      return `dest=${d} src=${s}`;\n"
+"    }\n"
+"  }\n"
+"  return n.name || id;\n"
+"}\n"
 "function msgSummary(p) {\n"
+"  if (p.protocol === 'meshcore') {\n"
+"    switch (p.mc_type) {\n"
+"      case 'GRP_TXT':\n"
+"        return p.text ? `<span class=text>${escHtml(p.text)}</span>` : null;\n"
+"      case 'GRP_DATA': {\n"
+"        const x = [];\n"
+"        if (p.data_type !== undefined) x.push('type='+p.data_type);\n"
+"        if (p.data_len !== undefined)  x.push('len='+p.data_len);\n"
+"        if (p.text) x.push(escHtml(p.text));\n"
+"        return x.length ? x.join(' ') : null;\n"
+"      }\n"
+"      case 'ADVERT': {\n"
+"        const x = [];\n"
+"        if (p.adv_type_name) x.push(p.adv_type_name);\n"
+"        if (typeof p.lat==='number' && typeof p.lon==='number')\n"
+"          x.push(`${p.lat.toFixed(5)},${p.lon.toFixed(5)}`);\n"
+"        x.push(p.sig_valid ? 'sig=ok' : 'sig=?');\n"
+"        return x.join(' ');\n"
+"      }\n"
+"      case 'TXT_MSG':\n"
+"      case 'REQ':\n"
+"      case 'RESPONSE':\n"
+"      case 'PATH':\n"
+"      case 'ANON_REQ':\n"
+"        // Genuinely opaque to a passive sniffer -- 1:1 packets encrypted\n"
+"        // with a per-pair ECDH shared secret we don't have (confirmed\n"
+"        // against the MeshCore firmware: dest_hash/src_hash + MAC is the\n"
+"        // entirety of the cleartext for all four, no route/ack info\n"
+"        // hides in there like TRACE's route list does). Label it as\n"
+"        // such instead of a bare dash so it doesn't look like a decode\n"
+"        // failure.\n"
+"        return '<span class=muted>encrypted 1:1 (no content without the peer\\'s key)</span>';\n"
+"      case 'TRACE':\n"
+"        return (typeof p.path_hop_count === 'number') ? `${p.path_hop_count} hops` : '\\u2014';\n"
+"      default:\n"
+"        return p.text ? escHtml(p.text) : '\\u2014';\n"
+"    }\n"
+"  }\n"
 "  const pn = p.port_name || '';\n"
 "  switch (pn) {\n"
 "    case 'TEXT_MESSAGE_APP':\n"
@@ -841,76 +1152,23 @@ static const char DASHBOARD_HTML[] =
 "  if (typeof alt === 'number')\n"
 "    stationMarker.setPopupContent(`<b>RX station</b><br>this sniffer<br>${alt.toFixed(1)} m`);\n"
 "}\n"
-// Activity tab: bucketed by *preset* (radio config: SF/BW/CR), with the
-// channels that ride on each preset listed inside the card. The preset
-// is the natural physical-layer view; channel-name + hash is the logical
-// view nested inside.
-"const activityGrid = document.getElementById('activity-grid');\n"
-"const activityEmpty = document.getElementById('activity-empty');\n"
-"// Standard Meshtastic presets, in firmware order. Pre-populated as cards\n"
-"// so the user sees the full grid immediately and idle slots are visible.\n"
-"const STANDARD_PRESETS = ['ShortTurbo','ShortFast','ShortSlow','MediumFast','MediumSlow','LongFast','LongMod','LongSlow','LongTurbo'];\n"
-"// activityState[preset] = {\n"
-"//   sparkBuckets:[60], bucketStart, frames, decrypted, ts, channels:{[hash]:{n,decrypted,name}}\n"
-"// }\n"
-"const activityState = {};\n"
-"function ensurePreset(preset){\n"
-"  if (activityState[preset]) return activityState[preset];\n"
-"  const now = Math.floor(Date.now()/1000);\n"
-"  return activityState[preset] = {\n"
-"    sparkBuckets:new Array(60).fill(0),\n"
-"    bucketStart: now,\n"
-"    frames:0, decrypted:0, ts:0,\n"
-"    channels:{},\n"
-"    /* Set of distinct decoder slot ids that received frames on this\n"
-"     * preset. Lets the card surface 'N slots active out of M' so the\n"
-"     * operator sees how broad the activity is across the band. */\n"
-"    slots: new Set()\n"
-"  };\n"
-"}\n"
-"// Pre-create the standard preset cards so the grid is fully laid out\n"
-"// before any traffic arrives.\n"
-"for (const p of STANDARD_PRESETS) ensurePreset(p);\n"
-"function activityNote(opts){\n"
-"  const preset = opts.preset || '?';\n"
-"  const s = ensurePreset(preset);\n"
-"  const now = Math.floor(Date.now()/1000);\n"
-"  // Slide the spark window forward to 'now' so older buckets age off.\n"
-"  const drift = now - s.bucketStart;\n"
-"  if (drift > 0) {\n"
-"    if (drift >= 60) s.sparkBuckets.fill(0);\n"
-"    else { s.sparkBuckets.splice(0, drift); for (let i=0;i<drift;++i) s.sparkBuckets.push(0); }\n"
-"    s.bucketStart = now;\n"
-"  }\n"
-"  if (opts.frame) { s.frames++; s.sparkBuckets[59]++; }\n"
-"  if (opts.decrypted) s.decrypted++;\n"
-"  if (opts.slot_id !== undefined && opts.slot_id !== null && opts.slot_id >= 0)\n"
-"    s.slots.add(opts.slot_id);\n"
-"  s.ts = now;\n"
-"  if (opts.hash !== undefined) {\n"
-"    const h = opts.hash;\n"
-"    let ch = s.channels[h];\n"
-"    if (!ch) ch = s.channels[h] = {n:0, decrypted:0, name:null};\n"
-"    ch.n++;\n"
-"    if (opts.decrypted) ch.decrypted++;\n"
-"    if (opts.channelName) ch.name = opts.channelName;\n"
-"  }\n"
-"  activityEmpty.style.display='none';\n"
-"}\n"
-"function drawSpark(canvas, buckets){\n"
-"  const ctx = canvas.getContext('2d');\n"
-"  const W = canvas.width, H = canvas.height;\n"
-"  ctx.clearRect(0,0,W,H);\n"
-"  let max = 1; for (const v of buckets) if (v > max) max = v;\n"
-"  const bw = W / buckets.length;\n"
-"  const isLight = document.documentElement.classList.contains('light');\n"
-"  ctx.fillStyle = isLight ? '#0284c7' : '#38bdf8';\n"
-"  for (let i=0;i<buckets.length;++i){\n"
-"    const v = buckets[i]; if (v <= 0) continue;\n"
-"    const h = Math.max(1, (v/max) * (H-2));\n"
-"    ctx.fillRect(i*bw, H-h, Math.max(1, bw-0.5), h);\n"
-"  }\n"
-"}\n"
+// Channels tab: a list of every channel hash seen (left) and, for the
+// selected channel, its message log with a best-effort routing path per
+// message (right). Message history + rendering both key off the same
+// `channels[hash]` object the Live-tab Channels pane already maintains
+// (see the channel bookkeeping block in es.onmessage below); this tab
+// just adds a `_msgs` ring buffer and a click-to-select UI on top of it.
+"const CHAN_HIST_MSGS = 200;\n"
+"const chantabListTbody = document.querySelector('#chantab-list tbody');\n"
+"const chantabEmpty = document.getElementById('chantab-empty');\n"
+"const chantabCount = document.getElementById('chantab-count');\n"
+"const chantabMsgsTbody = document.getElementById('chantab-msgs');\n"
+"const chantabMsgsEmpty = document.getElementById('chantab-msgs-empty');\n"
+"const chantabMsgsTitle = document.getElementById('chantab-msgs-title');\n"
+"const chantabMsgsLoadOlderWrap = document.getElementById('chantab-msgs-loadolder-wrap');\n"
+"const chantabMsgsLoadOlderBtn = document.getElementById('chantab-msgs-loadolder');\n"
+"const chantabMsgsLoadOlderStatus = document.getElementById('chantab-msgs-loadolder-status');\n"
+"let selectedChannelHash = null;\n"
 "function fmtAgo(ts){\n"
 "  /* ts is fractional epoch seconds from the JSON event; floor the whole\n"
 "   * delta so we render '14s ago' instead of '14.936086893081665s ago'. */\n"
@@ -919,85 +1177,169 @@ static const char DASHBOARD_HTML[] =
 "  if (dt < 3600) return Math.floor(dt/60)+'m ago';\n"
 "  return Math.floor(dt/3600)+'h ago';\n"
 "}\n"
-"// Coalesce activity-grid rebuilds into one frame regardless of how many\n"
-"// SSE events arrived since the last paint. Cheap; survives bursty traffic.\n"
-"let activityRafQueued = false;\n"
-"function refreshActivity(){\n"
-"  if (activityRafQueued) return;\n"
-"  activityRafQueued = true;\n"
-"  requestAnimationFrame(() => { activityRafQueued = false; renderActivity(); });\n"
-"}\n"
-"function renderActivity(){\n"
-"  // Sort: any preset with traffic in last 60s first (by fpm desc), then by\n"
-"  // last-seen recency. Idle standard presets always render last.\n"
-"  const presets = Object.keys(activityState);\n"
-"  presets.sort((a,b)=>{\n"
-"    const sa = activityState[a], sb = activityState[b];\n"
-"    const fa = sa.sparkBuckets.reduce((x,y)=>x+y,0);\n"
-"    const fb = sb.sparkBuckets.reduce((x,y)=>x+y,0);\n"
-"    if (fa !== fb) return fb - fa;\n"
-"    return sb.ts - sa.ts;\n"
-"  });\n"
-"  const seen = {};\n"
-"  for (const p of presets){\n"
-"    const s = activityState[p];\n"
-"    const id = 'chan-card-'+p;\n"
-"    let card = document.getElementById(id);\n"
-"    if (!card){\n"
-"      card = document.createElement('div'); card.id = id; card.className='chan-card';\n"
-"      card.innerHTML = `<div class=top><span class=nm></span><span class=preset></span></div>`+\n"
-"        `<div class=row2><div><span class=lbl>fpm</span><span class='v fpm'>0</span></div>`+\n"
-"        `<div><span class=lbl>Frames</span><span class='v frames'>0</span></div>`+\n"
-"        `<div><span class=lbl>Channels</span><span class='v chcount'>0</span></div>`+\n"
-"        `<div><span class=lbl>Slots</span><span class='v slots'>0</span></div></div>`+\n"
-"        `<canvas width=320 height=36></canvas>`+\n"
-"        `<div class=ch-list></div>`+\n"
-"        `<div class=last></div>`;\n"
-"      activityGrid.appendChild(card);\n"
+/* pathSummary -- best-effort per-message routing path, in whichever
+ * form the protocol/port actually carries one:
+ *  - MeshCore: the packet-framing path[] (route_path_hex /
+ *    route_path_hash_count) rides on every payload type, including
+ *    plain GRP_TXT channel chat -- so it's shown whenever present,
+ *    alongside the FLOOD/DIRECT route_type_name.
+ *  - Meshtastic: there's no full path on ordinary traffic, only
+ *    hop_start/hop_limit (hops used/total) and relay_node (last
+ *    relayer's id upper byte). ROUTING_APP/TRACEROUTE_APP frames
+ *    additionally carry a full node-id `route` array -- prefer that
+ *    when present since it's the real answer. */
+"function pathSummary(p){\n"
+"  if (p.protocol === 'meshcore') {\n"
+"    const rt = p.route_type_name || '';\n"
+"    if (p.route_path_hash_count) {\n"
+"      const size = p.route_path_hash_size || 1;\n"
+"      const hex = p.route_path_hex || '';\n"
+"      const hops = [];\n"
+"      for (let i = 0; i < p.route_path_hash_count; i++) hops.push(hex.substr(i*size*2, size*2));\n"
+"      return `${rt}: ${hops.join('\\u2192')}`;\n"
 "    }\n"
-"    seen[id] = true;\n"
-"    const fpm = s.sparkBuckets.reduce((a,b)=>a+b,0);\n"
-"    const chKeys = Object.keys(s.channels);\n"
-"    const chDecCount = chKeys.filter(k=>s.channels[k].decrypted>0).length;\n"
-"    card.querySelector('.nm').textContent = p;\n"
-"    card.querySelector('.preset').textContent = s.frames>0 ? Math.round(100*s.decrypted/s.frames)+'% decrypted' : 'idle';\n"
-"    card.querySelector('.fpm').textContent = fpm;\n"
-"    card.querySelector('.frames').textContent = fmtCount(s.frames);\n"
-"    card.querySelector('.chcount').textContent = chKeys.length>0 ? `${chDecCount}/${chKeys.length}` : '0';\n"
-"    card.querySelector('.slots').textContent = s.slots ? s.slots.size : 0;\n"
-"    card.querySelector('.last').textContent = s.ts ? fmtAgo(s.ts) : '--';\n"
-"    card.classList.toggle('hot', fpm > 0);\n"
-"    card.classList.toggle('dead', s.ts === 0 || (Math.floor(Date.now()/1000) - s.ts) > 120);\n"
-"    drawSpark(card.querySelector('canvas'), s.sparkBuckets);\n"
-"    // Channel sub-list: each row is one named channel hash on this preset.\n"
-"    const chList = card.querySelector('.ch-list');\n"
-"    if (chKeys.length === 0) {\n"
-"      chList.innerHTML = '';\n"
-"    } else {\n"
-"      // Sort channels by frame count desc.\n"
-"      chKeys.sort((a,b)=>s.channels[b].n - s.channels[a].n);\n"
-"      const rows = chKeys.slice(0, 8).map(h=>{\n"
-"        const c = s.channels[h];\n"
-"        const hex = '0x'+(parseInt(h)&0xff).toString(16).padStart(2,'0');\n"
-"        const isLocked = c.decrypted === 0;\n"
-"        const nm = c.name ? c.name : '(encrypted)';\n"
-"        return `<div class='ch-row${isLocked?' locked':''}'>`+\n"
-"               `<span class=ch-nm>${nm}</span>`+\n"
-"               `<span class=ch-stats>${hex} | ${fmtCount(c.n)}</span>`+\n"
-"               `</div>`;\n"
-"      }).join('');\n"
-"      const tail = chKeys.length > 8 ? `<div class='ch-row'><span class=ch-nm class=muted>... ${chKeys.length-8} more</span></div>` : '';\n"
-"      chList.innerHTML = rows + tail;\n"
-"    }\n"
+"    return rt || null;\n"
 "  }\n"
-"  // Hide the 'waiting for packets' hint once any preset has data.\n"
-"  const anyTraffic = Object.values(activityState).some(s=>s.frames>0);\n"
-"  activityEmpty.style.display = anyTraffic ? 'none' : 'block';\n"
-"  for (const c of Array.from(activityGrid.children)) if (!seen[c.id]) c.remove();\n"
+"  if (p.route && p.route.length) return p.route.join('\\u2192');\n"
+"  const parts = [];\n"
+"  if (typeof p.hop_start === 'number' && typeof p.hop_limit === 'number')\n"
+"    parts.push(`${p.hop_start - p.hop_limit}/${p.hop_start} hops`);\n"
+"  if (p.relay_node !== undefined && p.relay_node !== null)\n"
+"    parts.push('via 0x' + (p.relay_node & 0xff).toString(16).padStart(2,'0'));\n"
+"  return parts.length ? parts.join(' ') : null;\n"
 "}\n"
-"// Tick the spark windows + last-seen labels every second so cards drift\n"
-"// without needing an SSE event to repaint them.\n"
-"setInterval(()=>{ if (Object.keys(activityState).length) refreshActivity(); }, 1000);\n"
+/* buildMsgRow -- shared row shape for both live SSE chat frames
+ * (noteChannelMessage) and DB-loaded scroll-back (loadOlderMessages),
+ * so the two sources render identically without duplicating the
+ * field mapping. */
+"function buildMsgRow(p, summary){\n"
+"  return {t:p.ts, from:p.from||null, name:p.long_name||p.node_name||null,\n"
+"          type:p.port_name||p.mc_type||'', summary:summary, rawText:p.text||null, path:pathSummary(p),\n"
+"          pathHex:p.route_path_hex||p.trace_route_hashes_hex||null,\n"
+"          pathHopCount:p.route_path_hash_count||(p.trace_route_hashes_hex?p.trace_route_hashes_hex.length/2:0),\n"
+"          pathHashSize:p.route_path_hash_size||1};\n"
+"}\n"
+"function noteChannelMessage(h, p, summary){\n"
+"  const c = channels[h]; if (!c) return;\n"
+"  if (!c._msgs) c._msgs = [];\n"
+"  c._msgs.unshift(buildMsgRow(p, summary));\n"
+"  if (c._msgs.length > CHAN_HIST_MSGS) c._msgs.length = CHAN_HIST_MSGS;\n"
+"  if (selectedChannelHash === h) renderChannelMessages();\n"
+"}\n"
+"let chantabRafQueued = false;\n"
+"function refreshChannelsTab(){\n"
+"  if (chantabRafQueued) return;\n"
+"  chantabRafQueued = true;\n"
+"  requestAnimationFrame(()=>{ chantabRafQueued = false; renderChannelsTab(); });\n"
+"}\n"
+"function renderChannelsTab(){\n"
+"  const hashes = Object.keys(channels).sort((a,b)=>channels[b].ts-channels[a].ts);\n"
+"  chantabEmpty.style.display = hashes.length ? 'none' : 'block';\n"
+"  chantabCount.textContent = hashes.length ? `(${hashes.length})` : '';\n"
+"  const frag = document.createDocumentFragment();\n"
+"  for (const h of hashes){\n"
+"    const c = channels[h];\n"
+"    const tr = document.createElement('tr');\n"
+"    tr.className = 'chan-row' + (h === selectedChannelHash ? ' selected' : '');\n"
+"    const hashHex = '0x'+(parseInt(h)&0xff).toString(16).padStart(2,'0');\n"
+"    const name = c.name || '<span class=muted>(encrypted)</span>';\n"
+"    const proto = c.protocol === 'meshcore' ? 'MeshCore' : (c.preset || '<span class=muted>--</span>');\n"
+"    tr.innerHTML = `<td>${hashHex}</td><td>${name}</td><td>${proto}</td><td>${fmtCount(c.total)}</td><td>${fmtAgo(c.ts)}</td>`;\n"
+"    tr.onclick = ()=>selectChannel(h);\n"
+"    frag.appendChild(tr);\n"
+"  }\n"
+"  chantabListTbody.replaceChildren(frag);\n"
+"}\n"
+"function selectChannel(h){\n"
+"  selectedChannelHash = h;\n"
+"  renderChannelsTab();\n"
+"  renderChannelMessages();\n"
+"}\n"
+/* grpTxtSender -- MeshCore's GRP_TXT firmware convention (BaseChatMesh)
+ * embeds the real per-message sender as a "Name: message" prefix in
+ * the decrypted text itself; the packet-level `from`/id is only a
+ * synthetic per-CHANNEL tag (0x8000|channel_hash), not a per-sender
+ * identity, so it can't be used to tell two people in the same channel
+ * apart. Returns {name, body} split on the first ": ", or null if this
+ * isn't a GRP_TXT row or the text doesn't look prefixed. */
+"function grpTxtSender(m){\n"
+"  if (m.type !== 'GRP_TXT' || !m.rawText) return null;\n"
+"  const idx = m.rawText.indexOf(': ');\n"
+"  if (idx <= 0 || idx > 40) return null;\n"
+"  return { name: m.rawText.slice(0, idx), body: m.rawText.slice(idx + 2) };\n"
+"}\n"
+/* chatSide -- stable left/right bucket per distinct sender within a
+ * channel, so a back-and-forth between two people renders like a real
+ * SMS/WhatsApp thread instead of a uniform log. Assignment is sticky
+ * (stored on the channel object) so a sender doesn't flip sides on
+ * every re-render; a 3rd+ distinct sender just reuses the a/b split. */
+"function chatSide(c, key){\n"
+"  if (!c._sides) c._sides = {};\n"
+"  if (!c._sides[key]) c._sides[key] = (Object.keys(c._sides).length % 2 === 0) ? 'a' : 'b';\n"
+"  return c._sides[key];\n"
+"}\n"
+"function renderChannelMessages(){\n"
+"  const h = selectedChannelHash;\n"
+"  const c = h ? channels[h] : null;\n"
+"  if (!c) {\n"
+"    chantabMsgsTitle.innerHTML = 'Messages <span class=muted>select a channel</span>';\n"
+"    chantabMsgsTbody.replaceChildren();\n"
+"    chantabMsgsEmpty.style.display = 'block';\n"
+"    chantabMsgsLoadOlderWrap.style.display = 'none';\n"
+"    return;\n"
+"  }\n"
+"  const hashHex = '0x'+(parseInt(h)&0xff).toString(16).padStart(2,'0');\n"
+"  chantabMsgsTitle.innerHTML = `Messages <span class=muted>${c.name || '(encrypted)'} ${hashHex}</span>`;\n"
+"  const hist = [...(c._msgs||[]), ...(c._older||[])];\n"
+"  chantabMsgsEmpty.style.display = hist.length ? 'none' : 'block';\n"
+"  const frag = document.createDocumentFragment();\n"
+"  for (const m of hist){\n"
+"    const div = document.createElement('div');\n"
+"    const parsed = grpTxtSender(m);\n"
+"    const senderKey = parsed ? parsed.name : (m.name || m.from || '?');\n"
+"    div.className = 'chat-msg side-' + chatSide(c, senderKey);\n"
+"    const senderLabel = escHtml(parsed ? parsed.name : (m.name || 'Unknown'));\n"
+"    const body = parsed ? escHtml(parsed.body)\n"
+"      : ((m.summary===null || m.summary===undefined) ? '<span class=muted>\\u2014</span>' : m.summary);\n"
+"    const pathTitle = m.path ? ` title=\"${escHtml(m.path)}\"` : '';\n"
+"    const pathBtn = m.pathHex ? ` <button class=btn-mini${pathTitle} onclick=\"drawMessagePath('${m.pathHex}',${m.pathHopCount},${m.pathHashSize})\">path</button>` : '';\n"
+"    const pathHint = (!m.pathHex && m.path) ? `<span class=chat-path>${escHtml(m.path)}</span>` : '';\n"
+"    div.innerHTML = `<div class=chat-col>`\n"
+"      + `<div class=chat-meta><b>${senderLabel}</b></div>`\n"
+"      + `<div class=chat-bubble>${body}</div>`\n"
+"      + `<div class=chat-foot><span class=ts>${fmtTime(m.t)}</span>${pathHint}${pathBtn}</div>`\n"
+"      + `</div>`;\n"
+"    frag.appendChild(div);\n"
+"  }\n"
+"  chantabMsgsTbody.replaceChildren(frag);\n"
+"  chantabMsgsLoadOlderWrap.style.display = c._olderDone ? 'none' : 'block';\n"
+"}\n"
+/* loadOlderMessages -- fetch the next page of a channel's chat history
+ * directly from SQLite via /api/messages, older than the oldest row
+ * currently held (across live c._msgs and already-loaded c._older).
+ * Results are mapped through buildMsgRow/msgSummary only -- NOT run
+ * through the live es.onmessage dispatcher, which has map/topology/
+ * discovery side effects that must not fire for scroll-back history. */
+"async function loadOlderMessages(){\n"
+"  const h = selectedChannelHash; if (h == null) return;\n"
+"  const c = channels[h]; if (!c) return;\n"
+"  const all = [...(c._msgs||[]), ...(c._older||[])];\n"
+"  const oldestTs = all.length ? all[all.length-1].t : (Date.now()/1000);\n"
+"  chantabMsgsLoadOlderBtn.disabled = true;\n"
+"  chantabMsgsLoadOlderStatus.textContent = 'loading...';\n"
+"  try {\n"
+"    const resp = await fetch(`/api/messages?channel=${encodeURIComponent(h)}&before=${oldestTs}&limit=100`);\n"
+"    if (!resp.ok) throw new Error('http '+resp.status);\n"
+"    const j = await resp.json();\n"
+"    if (!c._older) c._older = [];\n"
+"    for (const p of (j.messages||[])) c._older.push(buildMsgRow(p, msgSummary(p)));\n"
+"    if (!j.more) c._olderDone = true;\n"
+"    chantabMsgsLoadOlderStatus.textContent = (j.messages||[]).length ? '' : 'no older messages';\n"
+"  } catch (e) { chantabMsgsLoadOlderStatus.textContent = 'failed to load'; }\n"
+"  chantabMsgsLoadOlderBtn.disabled = false;\n"
+"  if (selectedChannelHash === h) renderChannelMessages();\n"
+"}\n"
+"chantabMsgsLoadOlderBtn.onclick = loadOlderMessages;\n"
 "// =============================================================\n"
 "// Topology tab: force-directed mesh-graph rendered to canvas.\n"
 "// Edges come from two sources: NEIGHBORINFO_APP (authoritative\n"
@@ -1021,6 +1363,11 @@ static const char DASHBOARD_HTML[] =
 "// so even a sparse mesh with no NEIGHBORINFO traffic shows useful info\n"
 "// (what the sniffer can hear and how well).\n"
 "const RX_STATION_ID = '__rx_station__';\n"
+"// Radial layout ring spacing shared by topoEnsureNode's initial seed and\n"
+"// topoTick's ongoing radial spring, so a node with a known hopDepth\n"
+"// (see topoNoteRelayPath) settles at ring (hopDepth-1), radiating\n"
+"// outward from the RX station by real observed hop-distance.\n"
+"const TOPO_RING_BASE = 50, TOPO_RING_STEP = 55;\n"
 "function topoNoteEdge(srcId, dstId, snr){\n"
 "  if (!srcId || !dstId || srcId === dstId) return;\n"
 "  const k = srcId < dstId ? srcId+'|'+dstId : dstId+'|'+srcId;\n"
@@ -1070,17 +1417,108 @@ static const char DASHBOARD_HTML[] =
 "  topoEnsureNode(srcId); topoEnsureNode(RX_STATION_ID);\n"
 "  if (topoEmpty.style.display !== 'none') topoEmpty.style.display = 'none';\n"
 "}\n"
+"// Resolve one path hop's hash bytes (hex string) to a known node id.\n"
+"// A path hop hash is literally a prefix of the relaying repeater's own\n"
+"// pubkey (confirmed against the MeshCore firmware: Identity::copyHashTo()\n"
+"// copies pub_key bytes directly, no separate hash function) -- and this\n"
+"// dashboard's node id IS that same pubkey's first 4 bytes (see\n"
+"// mc_derive_from_id() in feed_meshcore_json.c), so a hop hash is always\n"
+"// a byte-prefix of some known node's id once we've seen that node's\n"
+"// ADVERT. Synthetic ids (GRP_TXT/envelope-only tags) are never pubkey-\n"
+"// derived and are excluded. At hash_size=1 (256 possible values) two\n"
+"// unrelated repeaters can legitimately share a hash -- the firmware\n"
+"// itself only guarantees uniqueness among a node's immediate neighbors,\n"
+"// not globally -- and once a few dozen nodes are known (easy: the\n"
+"// cross-restart node-list reload pulls in every node ever seen) most\n"
+"// 1-byte values collide with something. Rejecting all ambiguous 1-byte\n"
+"// hops outright made the tree show almost nothing in practice, so those\n"
+"// specifically fall back to a best-effort pick: whichever candidate was\n"
+"// heard most recently (statistically more likely to still be the active\n"
+"// repeater near us right now). 2-3 byte hops keep the strict\n"
+"// reject-on-ambiguity behavior -- collisions there are vanishingly\n"
+"// unlikely, so ambiguity is a real 'can't tell', not just noise.\n"
+"function topoResolveHop(hex) {\n"
+"  const want = hex.toLowerCase();\n"
+"  const matches = [];\n"
+"  for (const id of Object.keys(nodes)) {\n"
+"    if (nodes[id].synthetic) continue;\n"
+"    if (id.slice(1).toLowerCase().startsWith(want)) matches.push(id);\n"
+"  }\n"
+"  if (matches.length === 0) return null;\n"
+"  if (matches.length === 1) return matches[0];\n"
+"  if (want.length > 2) return null;\n"
+"  matches.sort((a,b) => (nodes[b].ts||0) - (nodes[a].ts||0));\n"
+"  return matches[0];\n"
+"}\n"
+"// Real relay edge, keyed in its own namespace so it never collides with\n"
+"// (or gets overwritten by) the heard/real/convo edges above, which share\n"
+"// one flat keyspace among themselves -- 'count' here means specifically\n"
+"// how many times this exact repeater-to-repeater hop was observed.\n"
+"function topoNoteRelay(srcId, dstId) {\n"
+"  if (!srcId || !dstId || srcId === dstId) return;\n"
+"  const pair = srcId < dstId ? srcId+'|'+dstId : dstId+'|'+srcId;\n"
+"  const k = 'relay:' + pair;\n"
+"  let e = topoEdges[k];\n"
+"  if (!e) e = topoEdges[k] = {a: srcId<dstId?srcId:dstId, b: srcId<dstId?dstId:srcId, count: 0, kind:'relay'};\n"
+"  e.count++; e.lastTs = Date.now()/1000;\n"
+"  topoEnsureNode(srcId); topoEnsureNode(dstId);\n"
+"  if (topoEmpty.style.display !== 'none') topoEmpty.style.display = 'none';\n"
+"}\n"
+"// Turn one event's route_path_hex into relay edges + hop-depth hints.\n"
+"// path[] is ordered from the FIRST repeater to touch the packet (closest\n"
+"// to origin) to the LAST (closest to us), each relay appending its own\n"
+"// hash before forwarding -- so consecutive hops are real observed\n"
+"// repeater-to-repeater exchanges, and the last hop is who actually\n"
+"// delivered this packet to our receiver.\n"
+"// Running tallies surfaced in the Topology legend (see topoRender) so\n"
+"// it's visible at a glance whether the tree is empty because no path\n"
+"// data has arrived yet (paths stays 0) vs. hops arriving but not\n"
+"// resolving to known nodes (resolved << hops) vs. something else.\n"
+"const topoRelayStats = { paths: 0, hops: 0, resolved: 0 };\n"
+"function topoNoteRelayPath(p) {\n"
+"  if (!p.route_path_hex || !p.route_path_hash_count || !p.route_path_hash_size) return;\n"
+"  const hexLen = p.route_path_hash_size * 2;\n"
+"  const hops = [];\n"
+"  for (let i = 0; i < p.route_path_hash_count; ++i) {\n"
+"    hops.push(p.route_path_hex.slice(i*hexLen, i*hexLen+hexLen));\n"
+"  }\n"
+"  const resolved = hops.map(topoResolveHop);\n"
+"  topoRelayStats.paths++; topoRelayStats.hops += hops.length;\n"
+"  topoRelayStats.resolved += resolved.filter(Boolean).length;\n"
+"  for (let i = 0; i < resolved.length - 1; ++i) {\n"
+"    if (resolved[i] && resolved[i+1]) topoNoteRelay(resolved[i], resolved[i+1]);\n"
+"  }\n"
+"  const last = resolved[resolved.length-1];\n"
+"  if (last) topoNoteRelay(last, RX_STATION_ID);\n"
+"  // Hop-depth from us, counted from the END of the path (last hop =\n"
+"  // depth 1, closest to us; first hop = depth N, closest to origin).\n"
+"  // Track the MINIMUM ever observed so the radial layout (topoTick)\n"
+"  // stays put even if a later packet happens to take a longer route.\n"
+"  for (let i = 0; i < resolved.length; ++i) {\n"
+"    const id = resolved[i];\n"
+"    if (!id) continue;\n"
+"    const depth = resolved.length - i;\n"
+"    const n = nodes[id];\n"
+"    if (n && (n.hopDepth === undefined || depth < n.hopDepth)) n.hopDepth = depth;\n"
+"  }\n"
+"}\n"
 "function topoEnsureNode(id){\n"
 "  if (topoNodes[id]) return topoNodes[id];\n"
 "  const rect = topoCanvas.getBoundingClientRect();\n"
 "  const W = rect.width || 800, H = rect.height || 600;\n"
 "  // RX station gets pinned at the canvas center so other nodes\n"
 "  // arrange around it geographically. Real nodes seed at a random\n"
-"  // ring around center so the force layout converges quickly.\n"
+"  // ring around center so the force layout converges quickly -- ring\n"
+"  // radius is biased by hopDepth (see topoNoteRelayPath) when known, so\n"
+"  // repeaters start roughly where the ongoing radial spring in topoTick\n"
+"  // will settle them instead of drifting in from a generic default ring.\n"
 "  if (id === RX_STATION_ID) {\n"
 "    topoNodes[id] = {id, x: W/2, y: H/2, vx:0, vy:0, pinned:true};\n"
 "  } else {\n"
-"    const a = Math.random()*Math.PI*2, r = 50 + Math.random()*60;\n"
+"    const n = nodes[id];\n"
+"    const depth = (n && n.hopDepth) || 1;\n"
+"    const baseR = TOPO_RING_BASE + (depth-1) * TOPO_RING_STEP;\n"
+"    const a = Math.random()*Math.PI*2, r = baseR + Math.random()*30;\n"
 "    topoNodes[id] = {id, x: W/2 + Math.cos(a)*r, y: H/2 + Math.sin(a)*r, vx:0, vy:0};\n"
 "  }\n"
 "  return topoNodes[id];\n"
@@ -1121,8 +1559,10 @@ static const char DASHBOARD_HTML[] =
 "  // Repulsion (Coulomb-ish): O(n^2). At our 200-node cap that's 40k pair\n"
 "  // checks per tick, well under the JS budget at 30 fps.\n"
 "  const K_REP = 7000, K_ATT = 0.04, REST = 80, GRAV = 0.012, DAMP = 0.85, V_MAX = 240;\n"
+"  const K_RAD = 0.02; // radial spring constant for hopDepth-ranked nodes\n"
 "  for (let i=0;i<ids.length;++i){\n"
-"    const a = topoNodes[ids[i]];\n"
+"    const id = ids[i];\n"
+"    const a = topoNodes[id];\n"
 "    let fx = 0, fy = 0;\n"
 "    for (let j=0;j<ids.length;++j){\n"
 "      if (i===j) continue;\n"
@@ -1134,8 +1574,22 @@ static const char DASHBOARD_HTML[] =
 "      const d = Math.sqrt(d2);\n"
 "      fx += (dx/d) * f; fy += (dy/d) * f;\n"
 "    }\n"
-"    // Center gravity so isolated subgraphs don't drift forever.\n"
-"    fx += (cx - a.x) * GRAV; fy += (cy - a.y) * GRAV;\n"
+"    // Nodes with a known hopDepth (real relay-path evidence) get pulled\n"
+"    // toward their ring radius instead of straight at the center, so the\n"
+"    // graph settles into rings radiating outward by hop-distance from us\n"
+"    // -- 'root from path'. Everything else keeps the old flat pull-to-\n"
+"    // center behavior unchanged.\n"
+"    const nd = nodes[id];\n"
+"    if (nd && nd.hopDepth) {\n"
+"      const targetR = TOPO_RING_BASE + (nd.hopDepth-1) * TOPO_RING_STEP;\n"
+"      const dx = a.x - cx, dy = a.y - cy;\n"
+"      const dist = Math.sqrt(dx*dx + dy*dy) || 0.001;\n"
+"      const diff = dist - targetR;\n"
+"      fx -= (dx/dist) * diff * K_RAD; fy -= (dy/dist) * diff * K_RAD;\n"
+"    } else {\n"
+"      // Center gravity so isolated subgraphs don't drift forever.\n"
+"      fx += (cx - a.x) * GRAV; fy += (cy - a.y) * GRAV;\n"
+"    }\n"
 "    a._fx = fx; a._fy = fy;\n"
 "  }\n"
 "  // Spring attraction along edges.\n"
@@ -1186,6 +1640,13 @@ static const char DASHBOARD_HTML[] =
 "  const W = topoCanvas.width, H = topoCanvas.height;\n"
 "  topoCtx.clearRect(0,0,W,H);\n"
 "  const isLight = document.documentElement.classList.contains('light');\n"
+"  const relayStatsEl = document.getElementById('topo-relay-stats');\n"
+"  if (relayStatsEl) {\n"
+"    const relayEdges = Object.keys(topoEdges).filter(k=>k.startsWith('relay:')).length;\n"
+"    relayStatsEl.textContent = topoRelayStats.paths\n"
+"      ? ` \\u00b7 relay: ${relayEdges} edge(s) from ${topoRelayStats.paths} path(s), ${topoRelayStats.resolved}/${topoRelayStats.hops} hops resolved`\n"
+"      : '';\n"
+"  }\n"
 "  // Edges first. 'heard' kind (this-station-to-source pseudo-edge)\n"
 "  // renders dashed and a touch fainter so it doesn't compete visually\n"
 "  // with real observed-RX edges (NEIGHBORINFO_APP / relay-hop).\n"
@@ -1196,7 +1657,17 @@ static const char DASHBOARD_HTML[] =
 "    const isH = topoHover && (e.a===topoHover || e.b===topoHover);\n"
 "    const isHeard = e.kind === 'heard';\n"
 "    const isConvo = e.kind === 'convo';\n"
-"    if (isConvo) {\n"
+"    const isRelay = e.kind === 'relay';\n"
+"    if (isRelay) {\n"
+"      /* Real relay-path edge: solid green, width scales with how many\n"
+"       * times this exact hop-pair has been observed -- 'bigger edge is\n"
+"       * the bigger exchange'. Capped/log-scaled so one very chatty pair\n"
+"       * can't dwarf the rest of the drawing. */\n"
+"      const w = Math.min(7, 1.5 + Math.log2(1 + e.count) * 1.2);\n"
+"      topoCtx.strokeStyle = isH ? 'rgba(74,222,128,0.95)' : 'rgba(74,222,128,0.65)';\n"
+"      topoCtx.lineWidth = isH ? w + 1 : w;\n"
+"      topoCtx.setLineDash([]);\n"
+"    } else if (isConvo) {\n"
 "      /* Conversation pair (both directions observed). Soft amber\n"
 "       * solid line, distinct from observed-RX SNR-colored edges. */\n"
 "      topoCtx.strokeStyle = isH ? 'rgba(251,191,36,0.95)' : 'rgba(251,191,36,0.65)';\n"
@@ -1219,7 +1690,14 @@ static const char DASHBOARD_HTML[] =
 "    const isStation = id === RX_STATION_ID;\n"
 "    const r = isStation ? 9 : topoNodeRadius(id);\n"
 "    const isH = id === topoHover;\n"
-"    topoCtx.beginPath(); topoCtx.arc(a.x, a.y, r, 0, Math.PI*2);\n"
+"    // REPEATER/ROOM/SENSOR nodes (from ADVERT's adv_type_name) render as\n"
+"    // squares so a repeater backbone reads visually distinct from chat\n"
+"    // clients at a glance -- everything else (incl. the RX station,\n"
+"    // handled separately above) stays a circle.\n"
+"    const nd2 = nodes[id];\n"
+"    const isRepeaterLike = !isStation && nd2 && (nd2.adv_type === 'REPEATER' || nd2.adv_type === 'ROOM' || nd2.adv_type === 'SENSOR');\n"
+"    topoCtx.beginPath();\n"
+"    if (isRepeaterLike) topoCtx.rect(a.x-r, a.y-r, r*2, r*2); else topoCtx.arc(a.x, a.y, r, 0, Math.PI*2);\n"
 "    if (isStation) {\n"
 "      topoCtx.fillStyle = isLight ? '#bae6fd' : '#0c4a6e';\n"
 "      topoCtx.fill();\n"
@@ -1319,6 +1797,27 @@ static const char DASHBOARD_HTML[] =
 "    }\n"
 "    return;\n"
 "  }\n"
+/* MC_CHANNEL_DISCOVERED -- the background hashtag dictionary attack
+ * (meshcore_hashtag_dict.c) cracked a channel that was previously seen
+ * only as encrypted. MC_CHANNEL_ADDED -- the same situation but for a
+ * channel manually added via /api/meshcore-channel (Config tab form or
+ * the Channels-tab hashtag button): the add itself is a plain POST
+ * response to whoever submitted it, not a broadcast, so every
+ * connected client (including the one that just submitted it) needs
+ * this event to learn the hash<->name mapping. Without either handler
+ * the Channels tab has no way to learn about it until (if ever)
+ * another frame happens to arrive on that exact channel_hash -- neither
+ * a crack nor a manual add generates a regular packet event on its own. */
+"  if (p.event === 'MC_CHANNEL_DISCOVERED' || p.event === 'MC_CHANNEL_ADDED') {\n"
+"    const h = p.channel_hash;\n"
+"    if (h !== undefined) {\n"
+"      if (!channels[h]) channels[h] = {total:0, decrypted:0, ts:Date.now()/1000, slots:new Set()};\n"
+"      channels[h].name = p.channel_name;\n"
+"      refreshChannels();\n"
+"      refreshChannelsTab();\n"
+"    }\n"
+"    return;\n"
+"  }\n"
 "  if (p.event === 'OFF_GRID_LORA') {\n"
 "    // Promote button: POSTs to /api/extra-freq to add a real decoder\n"
 "    // slot at the discovered frequency. BW guess uses the scanner's\n"
@@ -1331,7 +1830,13 @@ static const char DASHBOARD_HTML[] =
 "    pushTo(discEl, `<span class=disc>off-grid: ${(p.f_hz/1e6).toFixed(3)} MHz, SNR ${p.snr_db.toFixed(1)} dB, ~${(bwGuess/1000).toFixed(0)} kHz</span> ${promoteBtn}`, p.ts);\n"
 "    return;\n"
 "  }\n"
-"  if (!p.from) return;\n"
+"  // Debug tab: log every frame (either protocol) with its raw over-the-\n"
+"  // air bytes, unconditionally -- ahead of the trust/showUntrusted\n"
+"  // filtering and the '!p.from' node-identity gate below, since the\n"
+"  // whole point is to see frames those views intentionally hide or drop\n"
+"  // (CRC failures, MeshCore ACK/TRACE/PATH with no derivable sender id,\n"
+"  // etc).\n"
+"  if (p.raw_hex) noteAnalyzerFrame(p);\n"
 "  // Station-self marker on the live map (when --gpsd is running).\n"
 "  if (p.station_lat !== undefined && p.station_lon !== undefined) {\n"
 "    noteStation(p.station_lat, p.station_lon, p.station_alt_m);\n"
@@ -1361,6 +1866,14 @@ static const char DASHBOARD_HTML[] =
 "  // NEIGHBORINFO_APP traffic to mine real mesh-edge info from.\n"
 "  topoNoteHeard(p.from, p.snr_db);\n"
 "  if (p.to) topoNoteAddressed(p.from, p.to);\n"
+"  // Real relay-tree edges: unlike the heard-pseudo-edge above (which\n"
+"  // just connects the packet's nominal sender straight to us, ignoring\n"
+"  // any relaying), route_path_hex is the packet's ACTUAL hop-by-hop\n"
+"  // repeater trail. Runs for every event carrying a path -- including\n"
+"  // envelope-only REQ/RESPONSE/PATH/TXT_MSG, which have no resolvable\n"
+"  // 'from' of their own but still traversed real repeaters. See\n"
+"  // topoNoteRelayPath() below.\n"
+"  topoNoteRelayPath(p);\n"
 "  // Per-channel stats: bucket by channel_hash so unknown networks are visible too.\n"
 "  if (p.channel_hash !== undefined){\n"
 "    const h = p.channel_hash;\n"
@@ -1368,21 +1881,45 @@ static const char DASHBOARD_HTML[] =
 "    const c = channels[h]; c.total++; c.ts = p.ts;\n"
 "    if (p.channel_name) c.name = p.channel_name;\n"
 "    if (p.preset) c.preset = p.preset;\n"
+"    if (p.protocol) c.protocol = p.protocol;\n"
 "    if (p.slot_id !== undefined && p.slot_id !== null && p.slot_id >= 0) { if (!c.slots) c.slots = new Set(); c.slots.add(p.slot_id); c.lastSlot = p.slot_id; }\n"
-"    // 'decrypted' is only emitted when false; presence of port_name/portnum implies success.\n"
-"    const wasDecrypted = p.decrypted !== false && p.port_name;\n"
+"    // 'decrypted' is only emitted when false for Meshtastic (presence of\n"
+"    // port_name/portnum implies success there); MeshCore always emits an\n"
+"    // explicit boolean, so trust that directly instead of the (absent)\n"
+"    // port_name check, which would otherwise read every MeshCore frame\n"
+"    // -- including successfully-decrypted GRP_TXT/GRP_DATA/ADVERT ones --\n"
+"    // as undecrypted.\n"
+"    const wasDecrypted = p.protocol === 'meshcore' ? p.decrypted === true : (p.decrypted !== false && p.port_name);\n"
 "    if (wasDecrypted) c.decrypted++;\n"
 "    refreshChannels();\n"
-"    activityNote({preset:p.preset, hash:h, channelName:p.channel_name, slot_id:p.slot_id, frame:true, decrypted:wasDecrypted});\n"
-"    refreshActivity();\n"
+"    refreshChannelsTab();\n"
 "  }\n"
+"  // Everything above (station marker, untrusted filter, topology heard-\n"
+"  // edge, Channels pane) works from channel_hash/protocol\n"
+"  // alone and needs no node identity. Frame types with no derivable\n"
+"  // 'from' (MeshCore ACK/TRACE/PATH/REQ/RESPONSE/CONTROL -- see\n"
+"  // mc_derive_from_id() in feed_meshcore_json.c) still light up those\n"
+"  // views; only the node list / map / message log below need an id.\n"
+"  if (!p.from) return;\n"
 "  const id = p.from;\n"
-"  if (!nodes[id]) nodes[id] = {ts:0, frames:0};\n"
+"  // MeshCore GRP_TXT/GRP_DATA (id tagged !8000xxxx = 0x80000000|channel_hash)\n"
+"  // and REQ/RESPONSE/PATH/TXT_MSG with only a dest/src hash visible (id\n"
+"  // tagged !4000xxxx, see mc_node_id() in db_sqlite.c / mc_derive_from_id()\n"
+"  // in feed_meshcore_json.c) aren't a real device -- they're a synthetic\n"
+"  // grouping key so the same node_id field/column can carry a\n"
+"  // best-effort identity for messages with no real sender. Still tracked\n"
+"  // in `nodes` (message log below needs n.name/n.frames), just flagged so\n"
+"  // the Nodes table/CSV export can exclude the phantom entries.\n"
+"  const isSyntheticId = /^!(4000|8000)/i.test(id);\n"
+"  if (!nodes[id]) nodes[id] = {ts:0, frames:0, synthetic:isSyntheticId};\n"
 "  const n = nodes[id]; n.ts = p.ts; n.frames = (n.frames||0) + 1;\n"
 "  if (p.snr_db !== undefined) n.snr_db = p.snr_db;\n"
 "  if (p.decrypted === false) n.has_encrypted = true;\n"
 "  if (p.long_name) n.name = p.long_name + (p.short_name ? ' ['+p.short_name+']' : '');\n"
 "  else if (p.atak_callsign) n.name = p.atak_callsign + ' ['+p.atak_team+']';\n"
+"  // adv_type_name (CHAT/REPEATER/ROOM/SENSOR) drives the repeater-tree\n"
+"  // node shape in the Topology tab -- see topoRender().\n"
+"  if (p.adv_type_name) n.adv_type = p.adv_type_name;\n"
 "  if (p.lat !== undefined && p.lon !== undefined) {\n"
 "    const ll = [p.lat, p.lon];\n"
 "    if (markers[id]) markers[id].setLatLng(ll);\n"
@@ -1418,7 +1955,8 @@ static const char DASHBOARD_HTML[] =
 "  const focusedBadge = (typeof p.slot_id === 'number' && p.slot_id >= 1019)\n"
 "    ? '<span class=muted style=\"color:#38bdf8\">[focused]</span> ' : '';\n"
 "  const summary = msgSummary(p);\n"
-"  if (summary) pushTo(msgsEl, `${focusedBadge}<b>${n.name||id}</b> <span class=muted>${p.channel_name||''}</span> <span class=port>${p.port_name||''}</span>: ${summary}`, p.ts);\n"
+"  if (summary) pushTo(msgsEl, `${focusedBadge}<b>${msgFromLabel(p,n,id)}</b> <span class=muted>${p.channel_name||''}</span> <span class=port>${p.port_name||''}</span>: ${summary}`, p.ts);\n"
+"  if (p.channel_hash !== undefined) { noteChannelMessage(p.channel_hash, p, summary); refreshChannelsTab(); }\n"
 "  if (p.atak_callsign) pushTo(discEl, `<span class=atak>ATAK ${p.atak_callsign} (${p.atak_team}/${p.atak_role})${p.atak_chat?' chat: '+p.atak_chat:''}</span>`, p.ts);\n"
 "  noteNodeFrame(id, p);\n"
 "  evictNodes();\n"
@@ -1429,31 +1967,322 @@ static const char DASHBOARD_HTML[] =
 "  return r.ok ? await r.json() : {error:'HTTP '+r.status};\n"
 "}\n"
 "function setStatus(id, txt, ok){const el=document.getElementById(id); el.textContent=txt; el.className='hint '+(ok?'status-ok':'status-err');}\n"
-"async function postKeys(){\n"
-"  const body = document.getElementById('keys-input').value.replace(/\\n/g,',');\n"
-"  const r = await postBody('/api/keys', body);\n"
-"  if (r.error) setStatus('keys-status', r.error, false);\n"
-"  else { setStatus('keys-status', 'added '+r.added, true); document.getElementById('keys-input').value=''; }\n"
+/* Persistent MeshCore channel list -- the sniffer itself never
+ * persists added channels to disk (meshcore_channelset_t is in-memory
+ * only), so localStorage is the only durable record across restarts.
+ * the restore loop (below, run once at page load) re-POSTs every
+ * saved entry so a restarted sniffer gets its channels back without
+ * the user re-entering anything; add_channel_locked() (meshcore.c)
+ * upserts by name so this is safe to repeat on every page load. */
+"function loadMcChannels(){\n"
+"  try { return JSON.parse(localStorage.getItem('mc_channels')) || []; } catch(e) { return []; }\n"
 "}\n"
-"async function postShare(){\n"
-"  const body = document.getElementById('share-input').value;\n"
-"  const r = await postBody('/api/share-url', body);\n"
-"  if (r.error) setStatus('share-status', r.error, false);\n"
-"  else { setStatus('share-status', 'added '+r.added+' channel(s)', true); document.getElementById('share-input').value=''; }\n"
+"function saveMcChannels(list){\n"
+"  try { localStorage.setItem('mc_channels', JSON.stringify(list)); } catch(e) {}\n"
 "}\n"
-"async function postFreq(){\n"
-"  const body = document.getElementById('freq-input').value;\n"
-"  const r = await postBody('/api/extra-freq', body);\n"
-"  if (r.error) setStatus('freq-status', r.error, false);\n"
-"  else { setStatus('freq-status', 'channel '+r.channel_id, true); document.getElementById('freq-input').value=''; }\n"
+"function addMcChannelLocal(name, secret){\n"
+"  const list = loadMcChannels();\n"
+"  const i = list.findIndex(c => c.name === name);\n"
+"  const entry = {name, secret: secret || null};\n"
+"  if (i >= 0) list[i] = entry; else list.push(entry);\n"
+"  saveMcChannels(list);\n"
+"  renderMcChannelsList();\n"
 "}\n"
-"async function postCot(){\n"
-"  const body = document.getElementById('cot-input').value;\n"
-"  const r = await postBody('/api/cot-multicast', body);\n"
-"  if (r.error) setStatus('cot-status', r.error, false);\n"
-"  else if (r.enabled === false) setStatus('cot-status', 'disabled', true);\n"
-"  else setStatus('cot-status', r.host+':'+r.port, true);\n"
+"function removeMcChannelLocal(name){\n"
+"  saveMcChannels(loadMcChannels().filter(c => c.name !== name));\n"
+"  renderMcChannelsList();\n"
 "}\n"
+"function renderMcChannelsList(){\n"
+"  const el = document.getElementById('mc-channel-list');\n"
+"  if (!el) return;\n"
+"  const list = loadMcChannels();\n"
+"  if (!list.length) { el.innerHTML = '<div class=muted>no channels added yet</div>'; return; }\n"
+"  el.innerHTML = list.map(c => `<div class=item>${escHtml(c.name)} <span class=muted>${c.secret ? 'keyed' : 'hashtag'}</span> <button class=\"btn-mini mc-remove\" data-name=\"${escHtml(c.name)}\">Remove</button></div>`).join('');\n"
+"}\n"
+"document.getElementById('mc-channel-list').addEventListener('click', (e) => {\n"
+"  const btn = e.target.closest('button.mc-remove');\n"
+"  if (!btn) return;\n"
+"  removeMcChannelLocal(btn.dataset.name);\n"
+"});\n"
+"async function postMeshcoreChannel(){\n"
+"  const body = document.getElementById('mc-channel-input').value.replace(/\\n/g,',');\n"
+"  const r = await postBody('/api/meshcore-channel', body);\n"
+"  if (r.error) setStatus('mc-channel-status', r.error, false);\n"
+"  else {\n"
+"    setStatus('mc-channel-status', 'added '+r.added+' channel(s)', true);\n"
+"    for (const tok of body.split(/[,;]/)){\n"
+"      const t = tok.trim(); if (!t) continue;\n"
+"      const ci = t.indexOf(':');\n"
+"      if (ci < 0) addMcChannelLocal(t, null); else addMcChannelLocal(t.slice(0, ci), t.slice(ci+1));\n"
+"    }\n"
+"    document.getElementById('mc-channel-input').value='';\n"
+"  }\n"
+"}\n"
+/* addHashtagChannel -- Channels-tab control to add a channel by name
+ * only, no key. Posts a bare name (no colon) to the same endpoint
+ * postMeshcoreChannel() uses -- meshcore_channelset_add_hashtag()
+ * derives a real, working secret from the name alone (see meshcore.c),
+ * so this isn't a placeholder, it's a fully functional channel. */
+"async function addHashtagChannel(){\n"
+"  const input = document.getElementById('chantab-hashtag-input');\n"
+"  const btn = document.getElementById('chantab-hashtag-btn');\n"
+"  const name = input.value.trim();\n"
+"  if (!name) { setStatus('chantab-hashtag-status', 'enter a channel name first', false); input.focus(); return; }\n"
+"  btn.disabled = true;\n"
+"  try {\n"
+"    const r = await postBody('/api/meshcore-channel', name);\n"
+"    if (r.error) setStatus('chantab-hashtag-status', r.error, false);\n"
+"    else {\n"
+"      setStatus('chantab-hashtag-status', 'added', true);\n"
+"      addMcChannelLocal(name, null);\n"
+"      input.value = '';\n"
+"    }\n"
+"  } finally { btn.disabled = false; }\n"
+"}\n"
+"document.getElementById('chantab-hashtag-input').addEventListener('keydown', (e) => {\n"
+"  if (e.key === 'Enter') addHashtagChannel();\n"
+"});\n"
+/* One-time restore of every locally-remembered channel on page load
+ * (see the comment above loadMcChannels()). Runs after the DOM consts
+ * above are defined (renderMcChannelsList/postBody), same as the
+ * theme-init IIFE elsewhere in this script. */
+"renderMcChannelsList();\n"
+"for (const c of loadMcChannels()) postBody('/api/meshcore-channel', c.secret ? `${c.name}:${c.secret}` : c.name);\n"
+/* bootstrapNodesFromApi -- dashboard bootstrap-on-load counterpart to
+ * the localStorage channel restore above, but for nodes: node_db and
+ * the `nodes`/`markers` objects here are both live-traffic-only in
+ * memory, so a browser tab opened right after a sniffer restart would
+ * otherwise show nothing until every node happens to re-transmit.
+ * GET /api/nodes reads straight from the `nodes` and `events` SQL
+ * tables (see db_sqlite_query_nodes_json/_positions_json) and seeds
+ * the same `nodes{}`/`markers{}` shapes es.onmessage's packet handler
+ * builds up (web.c, around `const id = p.from;`), so renderNodes(),
+ * the CSV export, and topology labels all pick this up unchanged --
+ * this function intentionally does NOT call into es.onmessage itself,
+ * since that dispatcher has many live-only side effects (discovery
+ * panel, relay-hop edges, etc.) that don't apply to bootstrap data. */
+"async function bootstrapNodesFromApi(){\n"
+"  try {\n"
+"    const r = await fetch('/api/nodes');\n"
+"    if (!r.ok) return;\n"
+"    const data = await r.json();\n"
+"    for (const n of (data.nodes||[])) {\n"
+"      const id = n.id;\n"
+"      if (!nodes[id]) nodes[id] = {ts:0, frames:0, synthetic:/^!(4000|8000)/i.test(id)};\n"
+"      if (n.long_name) nodes[id].name = n.long_name + (n.short_name ? ' ['+n.short_name+']' : '');\n"
+"      if (n.last_seen && n.last_seen > nodes[id].ts) nodes[id].ts = n.last_seen;\n"
+"    }\n"
+"    const addedLatLngs = [];\n"
+"    for (const p of (data.positions||[])) {\n"
+"      const id = p.node_id;\n"
+"      if (!nodes[id]) nodes[id] = {ts:0, frames:0, synthetic:/^!(4000|8000)/i.test(id)};\n"
+"      if (p.ts && p.ts > nodes[id].ts) nodes[id].ts = p.ts;\n"
+"      if (!markers[id]) {\n"
+"        const ll = [p.lat, p.lon];\n"
+"        markers[id] = L.marker(ll).addTo(map).bindPopup(`<b>${id}</b><br>${nodes[id].name||''}`);\n"
+"        addedLatLngs.push(ll);\n"
+"      }\n"
+"    }\n"
+"    if (addedLatLngs.length) map.fitBounds(addedLatLngs, {maxZoom:10});\n"
+"    refreshNodes();\n"
+"  } catch(e) {}\n"
+"}\n"
+"bootstrapNodesFromApi();\n"
+/* bootstrapChannelsFromApi -- Channels-tab counterpart to
+ * bootstrapNodesFromApi() above: `channels{}` is likewise live-traffic-
+ * only in memory, built up only from SSE packet/CHAN_SNR/discovery
+ * events, so a plain browser refresh (no sniffer restart needed) loses
+ * every channel_hash->name mapping already learned -- including ones
+ * the background hashtag-dictionary attack cracked long ago -- until
+ * fresh traffic happens to arrive on that exact channel again. GET
+ * /api/meshcore-channels reads the durable hash->name mapping straight
+ * out of the events table (see db_sqlite_query_channel_names_json())
+ * and seeds `channels{}` the same shape the live handlers build, so
+ * renderChannelsTab() shows known names immediately on load. */
+"async function bootstrapChannelsFromApi(){\n"
+"  try {\n"
+"    const r = await fetch('/api/meshcore-channels');\n"
+"    if (!r.ok) return;\n"
+"    const data = await r.json();\n"
+"    for (const c of (data.channels||[])) {\n"
+"      const h = c.channel_hash;\n"
+"      if (h === undefined || h === null) continue;\n"
+"      if (!channels[h]) channels[h] = {total:0, decrypted:0, ts:0, slots:new Set()};\n"
+"      if (c.channel_name) channels[h].name = c.channel_name;\n"
+"    }\n"
+"    refreshChannelsTab();\n"
+"  } catch(e) {}\n"
+"}\n"
+"bootstrapChannelsFromApi();\n"
+/* Statistics tab: hand-rolled SVG donuts (stroke-dasharray technique on
+ * concentric <circle> elements) + a 100%-stacked CRC bar. No charting
+ * library exists anywhere in this dashboard (only Leaflet, for the
+ * map) -- matches that convention.
+ *
+ * Message type is a small closed vocabulary (mc_payload_type_name() in
+ * meshcore.c) -- a fixed name->color map keeps colors stable across
+ * every window switch/refetch. Channels are an open, unbounded universe
+ * (76+ observed in real captures), so the channel donut recolors by
+ * rank on every fetch instead: simpler, and always accurate to
+ * whichever window is currently selected, at the cost of a channel's
+ * color/legend slot being able to shift when the window changes -- a
+ * deliberate tradeoff (a window switch is "show different data", not
+ * an incremental live update). Both palettes are the dataviz skill's
+ * validated 8-hue categorical set, already checked against this
+ * dashboard's actual light/dark surfaces. */
+"const STATS_CATEGORICAL_DARK  = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];\n"
+"const STATS_CATEGORICAL_LIGHT = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];\n"
+"const STATS_OTHER_COLOR = '#64748b';\n"
+"const STATS_TYPE_COLORS_DARK = {GRP_TXT:'#3987e5',ADVERT:'#d95926',TRACE:'#199e70',ACK:'#c98500',TXT_MSG:'#d55181',REQ:'#008300',RESPONSE:'#9085e9',PATH:'#e66767'};\n"
+"const STATS_TYPE_COLORS_LIGHT = {GRP_TXT:'#2a78d6',ADVERT:'#eb6834',TRACE:'#1baf7a',ACK:'#eda100',TXT_MSG:'#e87ba4',REQ:'#008300',RESPONSE:'#4a3aa7',PATH:'#e34948'};\n"
+"function statsIsLight(){ return document.documentElement.classList.contains('light'); }\n"
+"function statsCategorical(){ return statsIsLight() ? STATS_CATEGORICAL_LIGHT : STATS_CATEGORICAL_DARK; }\n"
+"function statsTypeColor(label){ const m = statsIsLight() ? STATS_TYPE_COLORS_LIGHT : STATS_TYPE_COLORS_DARK; return m[label] || STATS_OTHER_COLOR; }\n"
+"function statsChannelLabel(row){ return row.label || row.channel_name || ('0x'+(row.channel_hash&0xff).toString(16).padStart(2,'0')); }\n"
+/* renderDonut -- data is already top-7-plus-Other-folded by the C
+ * layer: [{label,count},...]. colorFn(entry,index) picks a color for
+ * every entry except the literal "Other" row, which always renders in
+ * the fixed neutral gray so it never impersonates a real category.
+ * Segments are plain <circle> elements (not <canvas>) so each one is a
+ * real DOM node -- a <title> child gives every segment a native
+ * hover/focus tooltip with zero pointer-tracking code, matching this
+ * dashboard's existing level of interaction investment (nothing else
+ * here, including the Topology tab's hand-rolled canvas graph, has a
+ * custom tooltip layer either). Direct percentage labels are drawn on
+ * the largest slices only (top 4, skipping any sliver under ~6%). */
+"function renderDonut(containerEl, legendEl, tableEl, data, colorFn){\n"
+"  containerEl.innerHTML = '';\n"
+"  legendEl.innerHTML = '';\n"
+"  if (tableEl) tableEl.querySelector('tbody').replaceChildren();\n"
+"  const total = data.reduce((s,d)=>s+d.count,0);\n"
+"  if (!total) { containerEl.innerHTML = '<div class=muted style=\"padding:20px 4px\">No data in this window</div>'; return; }\n"
+"  const r = 50, cx = 60, cy = 60, sw = 18;\n"
+"  const circumference = 2 * Math.PI * r;\n"
+"  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');\n"
+"  svg.setAttribute('viewBox','0 0 120 120');\n"
+"  svg.setAttribute('width','140');\n"
+"  svg.setAttribute('height','140');\n"
+"  const g = document.createElementNS('http://www.w3.org/2000/svg','g');\n"
+"  g.setAttribute('transform','rotate(-90 60 60)');\n"
+"  svg.appendChild(g);\n"
+"  let offset = 0;\n"
+"  const directLabels = [];\n"
+"  data.forEach((d,i)=>{\n"
+"    const frac = d.count/total;\n"
+"    const len = frac * circumference;\n"
+"    const gap = data.length > 1 ? 2 : 0;\n"
+"    const color = (d.label === 'Other') ? STATS_OTHER_COLOR : colorFn(d, i);\n"
+"    const circle = document.createElementNS('http://www.w3.org/2000/svg','circle');\n"
+"    circle.setAttribute('cx',cx); circle.setAttribute('cy',cy); circle.setAttribute('r',r);\n"
+"    circle.setAttribute('fill','none');\n"
+"    circle.setAttribute('stroke',color);\n"
+"    circle.setAttribute('stroke-width',sw);\n"
+"    circle.setAttribute('stroke-dasharray', Math.max(len-gap,0)+' '+(circumference-Math.max(len-gap,0)));\n"
+"    circle.setAttribute('stroke-dashoffset', -offset);\n"
+"    circle.setAttribute('tabindex','0');\n"
+"    const pct = (frac*100).toFixed(1);\n"
+"    const title = document.createElementNS('http://www.w3.org/2000/svg','title');\n"
+"    title.textContent = d.label+': '+d.count+' ('+pct+'%)';\n"
+"    circle.appendChild(title);\n"
+"    g.appendChild(circle);\n"
+"    const midFrac = (offset + len/2) / circumference;\n"
+"    offset += len;\n"
+"    if (i < 4 && frac > 0.06) {\n"
+"      const rad = (-90 + midFrac*360) * Math.PI/180;\n"
+"      const text = document.createElementNS('http://www.w3.org/2000/svg','text');\n"
+"      text.setAttribute('x', cx + Math.cos(rad)*r);\n"
+"      text.setAttribute('y', cy + Math.sin(rad)*r);\n"
+"      text.setAttribute('text-anchor','middle');\n"
+"      text.setAttribute('dominant-baseline','middle');\n"
+"      text.setAttribute('font-size','9');\n"
+"      text.setAttribute('fill','#fff');\n"
+"      text.textContent = pct+'%';\n"
+"      directLabels.push(text);\n"
+"    }\n"
+"    const row = document.createElement('div');\n"
+"    row.innerHTML = '<span class=sw style=\"background:'+color+'\"></span>'+escHtml(d.label)+'<span class=cnt>'+d.count+' ('+pct+'%)</span>';\n"
+"    legendEl.appendChild(row);\n"
+"    if (tableEl) {\n"
+"      const tr = document.createElement('tr');\n"
+"      tr.innerHTML = '<td>'+escHtml(d.label)+'</td><td>'+d.count+'</td><td>'+pct+'%</td>';\n"
+"      tableEl.querySelector('tbody').appendChild(tr);\n"
+"    }\n"
+"  });\n"
+"  directLabels.forEach(t=>svg.appendChild(t));\n"
+"  containerEl.appendChild(svg);\n"
+"}\n"
+/* renderCrcBar -- CRC state is a status (good/warning/critical)
+ * semantic, not identity, so it deliberately reuses this dashboard's
+ * EXISTING .crc-badge colors rather than the categorical palette
+ * (status and categorical must never share a role -- see the dataviz
+ * skill's collision rule). Three direct-labeled values already satisfy
+ * the accessibility bar, so no table-view toggle here (unlike the
+ * two donuts, which fold to opaque-color slices). */
+"function renderCrcBar(barEl, legendEl, crc){\n"
+"  barEl.innerHTML = '';\n"
+"  legendEl.innerHTML = '';\n"
+"  const total = (crc.ok||0) + (crc.corrected||0) + (crc.failed||0);\n"
+"  if (!total) { legendEl.innerHTML = '<div class=muted>No CRC-bearing frames in this window</div>'; return; }\n"
+"  const parts = [\n"
+"    {label:'OK', count:crc.ok||0, color:'#064e3b', text:'#6ee7b7'},\n"
+"    {label:'Corrected', count:crc.corrected||0, color:'#78350f', text:'#fcd34d'},\n"
+"    {label:'Failed', count:crc.failed||0, color:'#450a0a', text:'#fca5a5'},\n"
+"  ];\n"
+"  parts.forEach(p=>{\n"
+"    const pct = (p.count/total*100);\n"
+"    if (p.count > 0) {\n"
+"      const seg = document.createElement('div');\n"
+"      seg.style.flexBasis = pct+'%';\n"
+"      seg.style.background = p.color;\n"
+"      seg.title = p.label+': '+p.count+' ('+pct.toFixed(1)+'%)';\n"
+"      barEl.appendChild(seg);\n"
+"    }\n"
+"    const row = document.createElement('div');\n"
+"    row.innerHTML = '<span class=sw style=\"background:'+p.color+'\"></span>'+p.label+'<span class=cnt>'+p.count+' ('+pct.toFixed(1)+'%)</span>';\n"
+"    legendEl.appendChild(row);\n"
+"  });\n"
+"}\n"
+"let statsWindow = '24h';\n"
+"async function fetchStats(){\n"
+"  const emptyEl = document.getElementById('stats-empty');\n"
+"  const chartsEl = document.getElementById('stats-charts');\n"
+"  try {\n"
+"    const r = await fetch('/api/stats?window='+statsWindow);\n"
+"    if (!r.ok) { chartsEl.style.display = 'none'; emptyEl.style.display = 'block'; return; }\n"
+"    chartsEl.style.display = 'flex';\n"
+"    emptyEl.style.display = 'none';\n"
+"    const d = await r.json();\n"
+"    renderDonut(\n"
+"      document.getElementById('stats-donut-type'), document.getElementById('stats-legend-type'),\n"
+"      document.getElementById('stats-table-type'),\n"
+"      (d.by_type||[]).map(row=>({label:row.label, count:row.count})),\n"
+"      (row)=>statsTypeColor(row.label)\n"
+"    );\n"
+"    renderDonut(\n"
+"      document.getElementById('stats-donut-channel'), document.getElementById('stats-legend-channel'),\n"
+"      document.getElementById('stats-table-channel'),\n"
+"      (d.by_channel||[]).map(row=>({label:statsChannelLabel(row), count:row.count})),\n"
+"      (row,i)=>statsCategorical()[i] || STATS_OTHER_COLOR\n"
+"    );\n"
+"    renderCrcBar(document.getElementById('stats-crcbar'), document.getElementById('stats-legend-crc'), d.crc||{});\n"
+"  } catch(e) { chartsEl.style.display = 'none'; emptyEl.style.display = 'block'; }\n"
+"}\n"
+"document.querySelectorAll('.stats-window-btn').forEach(btn=>{\n"
+"  btn.addEventListener('click', ()=>{\n"
+"    document.querySelectorAll('.stats-window-btn').forEach(b=>b.classList.remove('active'));\n"
+"    btn.classList.add('active');\n"
+"    statsWindow = btn.dataset.window;\n"
+"    fetchStats();\n"
+"  });\n"
+"});\n"
+"document.querySelectorAll('.stats-table-toggle').forEach(btn=>{\n"
+"  btn.addEventListener('click', ()=>{\n"
+"    const target = document.getElementById('stats-table-'+btn.dataset.target);\n"
+"    const showing = target.style.display !== 'none';\n"
+"    target.style.display = showing ? 'none' : 'table';\n"
+"    btn.textContent = showing ? 'View as table' : 'Hide table';\n"
+"  });\n"
+"});\n"
 "</script></body></html>\n";
 
 static int set_nonblock(int fd) {
@@ -1478,6 +2307,7 @@ static void serve_index(int fd) {
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n\r\n", sizeof(DASHBOARD_HTML) - 1);
     send_all(fd, hdr, (size_t)n);
@@ -1810,7 +2640,11 @@ static void promote_to_sse(int fd) {
          * publishers (low-rate stats + per-frame events) tolerate it. */
         if (send(fd, data_prefix, 6, MSG_NOSIGNAL) < 0) break;
         if (send(fd, e->buf, e->len, MSG_NOSIGNAL) < 0) break;
-        if (send(fd, "\n", 1, MSG_NOSIGNAL) < 0) break;
+        /* Two LFs: e->buf is stored trimmed of any trailing newline (see
+         * web_publish_line), so this alone must supply the full blank-line
+         * SSE terminator -- one '\n' here would reproduce the same
+         * message-merging bug live publish just got fixed for. */
+        if (send(fd, "\n\n", 2, MSG_NOSIGNAL) < 0) break;
     }
     set_nonblock(fd);
     if (g_sse_count < MAX_SSE_CLIENTS) {
@@ -1858,6 +2692,183 @@ static size_t recv_full_request(int fd, char *buf, size_t cap)
     return got;
 }
 
+/* Extract the query-string of an HTTP request line (everything between
+ * the first '?' and the following space) into out, NUL-terminated.
+ * Returns false if there's no '?' before the request-line's end. */
+static bool extract_query_string(const char *req, char *out, size_t outcap)
+{
+    const char *q = strchr(req, '?');
+    if (!q) return false;
+    ++q;
+    const char *end = q;
+    while (*end && *end != ' ' && *end != '\r' && *end != '\n') ++end;
+    size_t len = (size_t)(end - q);
+    if (len >= outcap) len = outcap - 1;
+    memcpy(out, q, len);
+    out[len] = 0;
+    return true;
+}
+
+/* Find `key=value` in an already-extracted, '&'-joined query string;
+ * url-decodes the value into out. Returns true if found. */
+static bool query_get(const char *qs, const char *key, char *out, size_t outcap)
+{
+    size_t keylen = strlen(key);
+    const char *p = qs;
+    while (p && *p) {
+        const char *amp = strchr(p, '&');
+        size_t seglen = amp ? (size_t)(amp - p) : strlen(p);
+        if (seglen > keylen && p[keylen] == '=' && strncmp(p, key, keylen) == 0) {
+            size_t vlen = seglen - keylen - 1;
+            if (vlen >= outcap) vlen = outcap - 1;
+            memcpy(out, p + keylen + 1, vlen);
+            out[vlen] = 0;
+            url_decode_inplace(out);
+            return true;
+        }
+        p = amp ? amp + 1 : NULL;
+    }
+    return false;
+}
+
+/* GET /api/messages?channel=<hash>&before=<ts>&limit=<n> -- on-demand
+ * chat scroll-back, bypassing the SSE history ring entirely so depth is
+ * bounded only by what's in the SQLite DB (see db_sqlite_query_messages_json). */
+static void handle_api_messages(int fd, const char *req)
+{
+    char qs[512] = {0}, chbuf[32] = {0}, beforebuf[32] = {0}, limbuf[16] = {0};
+    extract_query_string(req, qs, sizeof(qs));
+
+    long channel_hash = -1;
+    double before_ts = 0.0;
+    long limit = API_MESSAGES_DEFAULT_LIMIT;
+    if (query_get(qs, "channel", chbuf, sizeof(chbuf))) channel_hash = strtol(chbuf, NULL, 0);
+    if (query_get(qs, "before", beforebuf, sizeof(beforebuf))) before_ts = atof(beforebuf);
+    if (query_get(qs, "limit", limbuf, sizeof(limbuf))) limit = strtol(limbuf, NULL, 10);
+    if (limit <= 0) limit = API_MESSAGES_DEFAULT_LIMIT;
+    if (limit > API_MESSAGES_MAX_LIMIT) limit = API_MESSAGES_MAX_LIMIT;
+    if (channel_hash < 0) { send_response(fd, 400, "{\"error\":\"missing channel\"}"); return; }
+
+    char *body = db_sqlite_query_messages_json((uint32_t)channel_hash, before_ts, (int)limit);
+    if (!body) { send_response(fd, 503, "{\"error\":\"sqlite not configured\"}"); return; }
+    send_response(fd, 200, body);
+    free(body);
+}
+
+/* GET /api/nodes -- dashboard bootstrap-on-load. Combines
+ * db_sqlite_query_nodes_json() (names, from the `nodes` table) and
+ * db_sqlite_query_positions_json() (each node's last known lat/lon,
+ * from the `events` table) into one response, so a freshly-loaded
+ * browser tab isn't blank after a sniffer restart even though the
+ * live-traffic-only `nodes{}`/`markers{}` frontend state has nothing
+ * yet. See db_sqlite.h for the exact per-array shapes. */
+static void handle_api_nodes(int fd, const char *req)
+{
+    (void)req;
+    char *nodes_json = db_sqlite_query_nodes_json();
+    char *pos_json = db_sqlite_query_positions_json();
+    if (!nodes_json || !pos_json) {
+        free(nodes_json);
+        free(pos_json);
+        send_response(fd, 503, "{\"error\":\"sqlite not configured\"}");
+        return;
+    }
+    size_t cap = strlen(nodes_json) + strlen(pos_json) + 32;
+    char *body = malloc(cap);
+    if (!body) {
+        free(nodes_json);
+        free(pos_json);
+        send_response(fd, 500, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    snprintf(body, cap, "{\"nodes\":%s,\"positions\":%s}", nodes_json, pos_json);
+    send_response(fd, 200, body);
+    free(nodes_json);
+    free(pos_json);
+    free(body);
+}
+
+/* GET /api/meshcore-channels -- Channels-tab bootstrap-on-load, same
+ * rationale as handle_api_nodes() above: the frontend's `channels{}`
+ * state only ever grows from live SSE traffic (packet events,
+ * MC_CHANNEL_DISCOVERED/MC_CHANNEL_ADDED), so a plain browser refresh
+ * wipes every previously-learned channel_hash->name mapping until (if
+ * ever) fresh traffic happens to arrive on that exact channel again.
+ * db_sqlite_query_channel_names_json() reads the durable mapping
+ * straight out of the events table instead. */
+static void handle_api_meshcore_channels(int fd, const char *req)
+{
+    (void)req;
+    char *json = db_sqlite_query_channel_names_json();
+    if (!json) {
+        send_response(fd, 503, "{\"error\":\"sqlite not configured\"}");
+        return;
+    }
+    size_t cap = strlen(json) + 16;
+    char *body = malloc(cap);
+    if (!body) {
+        free(json);
+        send_response(fd, 500, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    snprintf(body, cap, "{\"channels\":%s}", json);
+    send_response(fd, 200, body);
+    free(json);
+    free(body);
+}
+
+#define STATS_WINDOW_24H_SECS (24.0 * 3600.0)
+#define STATS_WINDOW_1W_SECS  (7.0 * 24.0 * 3600.0)
+#define STATS_WINDOW_1M_SECS  (30.0 * 24.0 * 3600.0) /* fixed 30-day window, not calendar-aware */
+
+/* GET /api/stats?window=24h|1w|1m -- Statistics tab. Named presets
+ * only (not an arbitrary ?hours=N) -- a closed 3-value whitelist needs
+ * no numeric validation, unlike /api/messages' `limit` param. Combines
+ * the three MeshCore-only aggregate queries (db_sqlite.h) into one
+ * response; since_ts is computed here from the current wall clock, a
+ * client never gets to supply its own timestamp. */
+static void handle_api_stats(int fd, const char *req)
+{
+    char qs[128] = {0}, winbuf[8] = {0};
+    extract_query_string(req, qs, sizeof(qs));
+
+    double window_secs = STATS_WINDOW_24H_SECS;
+    if (query_get(qs, "window", winbuf, sizeof(winbuf))) {
+        if (!strcmp(winbuf, "1w")) window_secs = STATS_WINDOW_1W_SECS;
+        else if (!strcmp(winbuf, "1m")) window_secs = STATS_WINDOW_1M_SECS;
+        /* anything else (including "24h" or garbage) keeps the 24h default */
+    }
+    struct timespec ts_now;
+    clock_gettime(CLOCK_REALTIME, &ts_now);
+    double since_ts = (double)ts_now.tv_sec + (double)ts_now.tv_nsec / 1e9 - window_secs;
+
+    char *by_type    = db_sqlite_query_stats_by_type_json(since_ts);
+    char *by_channel = db_sqlite_query_stats_by_channel_json(since_ts);
+    char *crc        = db_sqlite_query_stats_crc_json(since_ts);
+    if (!by_type || !by_channel || !crc) {
+        free(by_type);
+        free(by_channel);
+        free(crc);
+        send_response(fd, 503, "{\"error\":\"sqlite not configured\"}");
+        return;
+    }
+    size_t cap = strlen(by_type) + strlen(by_channel) + strlen(crc) + 64;
+    char *body = malloc(cap);
+    if (!body) {
+        free(by_type);
+        free(by_channel);
+        free(crc);
+        send_response(fd, 500, "{\"error\":\"out of memory\"}");
+        return;
+    }
+    snprintf(body, cap, "{\"by_type\":%s,\"by_channel\":%s,\"crc\":%s}", by_type, by_channel, crc);
+    send_response(fd, 200, body);
+    free(by_type);
+    free(by_channel);
+    free(crc);
+    free(body);
+}
+
 static void *web_thread(void *arg)
 {
     (void)arg;
@@ -1884,6 +2895,10 @@ static void *web_thread(void *arg)
             strncmp(buf, "GET /\r",       6) == 0 ||
             strncmp(buf, "GET /index",   10) == 0) serve_index(fd);
         else if (strncmp(buf, "GET /events", 11) == 0) promote_to_sse(fd);
+        else if (strncmp(buf, "GET /api/messages", 17) == 0) handle_api_messages(fd, buf);
+        else if (strncmp(buf, "GET /api/nodes", 14) == 0) handle_api_nodes(fd, buf);
+        else if (strncmp(buf, "GET /api/meshcore-channels", 26) == 0) handle_api_meshcore_channels(fd, buf);
+        else if (strncmp(buf, "GET /api/stats", 14) == 0) handle_api_stats(fd, buf);
         else if (strncmp(buf, "POST /api/keys", 14) == 0) {
             if (!api_auth_ok(buf, fd)) { close(fd); continue; }
             c2_response_t r;
@@ -1917,6 +2932,12 @@ static void *web_thread(void *arg)
             if (!api_auth_ok(buf, fd)) { close(fd); continue; }
             c2_response_t r;
             c2_cot_multicast(find_body(buf), &r);
+            send_response(fd, r.status, r.body);
+        }
+        else if (strncmp(buf, "POST /api/meshcore-channel", 26) == 0) {
+            if (!api_auth_ok(buf, fd)) { close(fd); continue; }
+            c2_response_t r;
+            c2_meshcore_channel_add(find_body(buf), &r);
             send_response(fd, r.status, r.body);
         }
         else serve_404(fd);
@@ -1954,16 +2975,37 @@ void web_init(int port)
 void web_publish_line(const char *json, size_t len)
 {
     if (!json || len == 0) return;
-    /* Assemble "data: <json>\n" (json already ends with its own newline,
-     * so the trailing '\n' here completes the SSE event terminator) into
-     * one buffer and write it with a single send(). Splitting into three
-     * send() calls let a slow browser take the header, return EAGAIN on
-     * the body, and keep the FD open mid-frame -- the next event then
-     * appended a fresh "data: " on top of the half-written one and
-     * corrupted every subsequent message on that client. */
+
+    /* Callers vary: STATS/CHAN_SNR are built with raw snprintf format
+     * strings that already end in "}\n", but the jw.c-based per-event
+     * serializer (feed.c / feed_meshcore_json.c) does NOT append a
+     * trailing newline -- jw_close() only writes '}'. Strip whatever
+     * trailing CR/LF the caller happened to include so every caller
+     * is normalized the same way before we add our own terminator. */
+    while (len > 0 && (json[len - 1] == '\n' || json[len - 1] == '\r')) --len;
+    if (len == 0) return;
+
+    /* Assemble "data: <json>\n\n" into one buffer and write it with a
+     * single send(). The SSE spec requires a blank line (two LFs) to
+     * terminate an event -- a single trailing '\n' is NOT enough; the
+     * browser's EventSource then treats the next published line as a
+     * continuation of the same (still-open) event, silently merging
+     * two unrelated JSON payloads into one e.data string joined by a
+     * bare '\n', which fails JSON.parse and gets dropped by the
+     * dashboard's top-level `catch(_){return;}`. This is what was
+     * happening to essentially every mesh-event message before this
+     * fix (STATS/CHAN_SNR happened to already end in "}\n" from their
+     * own format strings, so they -- coincidentally -- always framed
+     * correctly and never demonstrated the bug on their own).
+     *
+     * Splitting into multiple send() calls would let a slow browser
+     * take part of the frame, return EAGAIN on the rest, and keep the
+     * FD open mid-frame -- the next event then appends on top of the
+     * half-written one and corrupts every subsequent message on that
+     * client -- so this stays one single send() of the whole frame. */
     static const char HDR[] = "data: ";
     const size_t hdrlen = sizeof(HDR) - 1;
-    const size_t total  = hdrlen + len + 1;
+    const size_t total  = hdrlen + len + 2;
 
     char  stackbuf[4096];
     char *buf = stackbuf;
@@ -1973,7 +3015,8 @@ void web_publish_line(const char *json, size_t len)
     }
     memcpy(buf, HDR, hdrlen);
     memcpy(buf + hdrlen, json, len);
-    buf[hdrlen + len] = '\n';
+    buf[hdrlen + len]     = '\n';
+    buf[hdrlen + len + 1] = '\n';
 
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_sse_count; ) {

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: long-term JSONL archive sink.
+ * meshcore-sniffer: long-term JSONL archive sink.
  *
  * Daily-rotated gzipped JSONL using zlib's gzFile interface. Single
  * mutex serializes writes; the rotation check runs on every publish

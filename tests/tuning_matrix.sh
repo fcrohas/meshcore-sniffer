@@ -13,7 +13,7 @@ mkdir -p "$OUT_DIR"
 CSV="$OUT_DIR/results.csv"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$REPO/build/meshtastic-sniffer"
+BIN="$REPO/build/meshcore-sniffer"
 [ -x "$BIN" ] || { echo "build the sniffer first: $BIN missing" >&2; exit 1; }
 
 echo "sink_workers,omp_threads,measure_s,msps_mean,msps_min,msps_max,ooo_chars,pool_sub,pool_comp,pool_queue_bp,pool_freebuf_waits,pump_sub,pump_proc,pump_queue_waits" > "$CSV"

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: packet decoder.
+ * meshcore-sniffer: packet decoder.
  *
  * Takes raw bytes from the LoRa demod (16-byte radio header + N
  * encrypted payload bytes), routes by channel hash to the keyset,
@@ -15,6 +15,7 @@
 #define MESH_PACKET_H
 
 #include "keyset.h"
+#include "meshcore.h"
 #include "meshtastic.h"
 
 #include <stdbool.h>
@@ -61,6 +62,9 @@ typedef struct mesh_event {
      * mean "no useful value to report" and feed.c suppresses them. */
     bool           has_crc;          /* payload had a trailing CRC16 trailer */
     bool           payload_crc_ok;   /* CRC verified; meaningful only when has_crc */
+    bool           crc_corrected;    /* payload_crc_ok is true only via a single-bit
+                                       * brute-force fix (lora_crc_bruteforce_correct);
+                                       * see lora_frame_meta_t.crc_corrected */
     float          cfo_hz;           /* carrier-frequency offset estimate */
 
     /* Per-station capture timestamp + self-reported accuracy (ns).
@@ -103,6 +107,14 @@ typedef struct mesh_event {
     uint32_t       portnum;
     const uint8_t *payload;
     size_t         payload_len;
+
+    /* Raw over-the-air frame (radio header + payload, as demodulated),
+     * hex-encoded. Populated unconditionally for both protocols --
+     * including CRC failures and undecrypted frames -- so the web
+     * dashboard's Debug tab can show exactly what was received
+     * regardless of decode outcome. Truncated to 256 raw bytes (512
+     * hex chars) if longer. */
+    char           raw_hex[513];
     uint32_t       request_id;         /* protobuf field 6 (or 0) */
     uint32_t       reply_id;           /* protobuf field 7 (or 0) */
     bool           want_response;      /* protobuf field 4 */
@@ -111,6 +123,53 @@ typedef struct mesh_event {
     /* TEXT_MESSAGE_APP: payload is UTF-8 text directly. */
     /* POSITION_APP / NODEINFO_APP / TELEMETRY_APP: cooked into the
      * structs below by mesh_decoders.c (TODO). */
+
+    /* ---- MeshCore-specific fields (--protocol=meshcore) ----
+     * Left zeroed/false for the Meshtastic path; feed.c branches on
+     * is_meshcore before touching any Meshtastic-only field above
+     * that doesn't apply (header.to/from/packet_id, portnum, etc). */
+    bool     is_meshcore;
+    int      mc_route_type;
+    int      mc_payload_type;    /* mc_payload_type_t */
+    int      mc_payload_ver;
+    char     mc_type_name[16];   /* "ADVERT" / "TXT_MSG" / ... */
+    uint8_t  mc_dest_hash;
+    uint8_t  mc_src_hash;
+    uint8_t  mc_channel_hash;
+    uint32_t mc_timestamp;       /* decoded uint32 LE timestamp, when present */
+    char     mc_node_name[40];   /* ADVERT app_data name, when parsed */
+    char     mc_text[256];       /* TXT_MSG / GRP_TXT decoded text */
+    uint8_t  mc_pubkey[32];      /* ADVERT / ANON_REQ pubkey material */
+    int      mc_path_hop_count;
+    uint8_t  mc_path_snrs[MC_MAX_PATH_SIZE];
+    uint8_t  mc_path_hashes[MC_MAX_PATH_SIZE];
+    /* Header-level routing path (distinct from mc_path_hashes/snrs
+     * above, which are the TRACE *payload's* hop table). This is the
+     * path[] field carried in every MeshCore packet's framing -- the
+     * accumulated relay-hash trail for FLOOD routing, or the intended
+     * hop sequence for DIRECT routing. Present on any payload_type,
+     * including GRP_TXT/GRP_DATA channel broadcasts, so it's the only
+     * per-message "path" available for ordinary channel traffic. */
+    int      mc_hdr_path_hash_count;  /* number of hops in mc_hdr_path[] */
+    int      mc_hdr_path_hash_size;   /* bytes per hop hash: 1, 2, or 3 */
+    int      mc_hdr_path_len;         /* bytes actually copied into mc_hdr_path[] */
+    uint8_t  mc_hdr_path[MC_MAX_PATH_SIZE];
+    bool     mc_sig_valid;       /* ADVERT: Ed25519 signature verified against mc_pubkey */
+    uint16_t mc_data_type;       /* GRP_DATA: data_type field (u16 LE) */
+    uint16_t mc_data_len;        /* GRP_DATA: data_len field (u8 on the wire, widened here) */
+    uint8_t  mc_txt_type;        /* GRP_TXT: TXT_TYPE_PLAIN(0)/CLI_DATA(1)/SIGNED_PLAIN(2) */
+
+    /* ADVERT app_data (AdvertDataBuilder/Parser format): flags byte
+     * (bits[3:0]=adv_type, bits[7:4]=presence flags) followed by
+     * optional lat/lon, extra1, extra2, and name. See mc_adv_type_t /
+     * ADV_*_MASK in meshcore.h. */
+    uint8_t  mc_adv_type;        /* ADVERT: flags & ADV_TYPE_MASK */
+    bool     mc_has_latlon;      /* ADVERT: ADV_LATLON_MASK was set */
+    double   mc_lat;             /* ADVERT: decoded latitude, degrees */
+    double   mc_lon;             /* ADVERT: decoded longitude, degrees */
+    bool     mc_has_name;        /* ADVERT: ADV_NAME_MASK was set */
+    uint16_t mc_extra1;          /* ADVERT: ADV_FEAT1_MASK payload, when present */
+    uint16_t mc_extra2;          /* ADVERT: ADV_FEAT2_MASK payload, when present */
 } mesh_event_t;
 
 typedef void (*mesh_event_cb_t)(const mesh_event_t *ev, void *user);

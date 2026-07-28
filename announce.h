@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: fusion auto-announce.
+ * meshcore-sniffer: fusion auto-announce.
  *
  * When --announce-to=URL is set, a background thread periodically
  * POSTs this sensor's registry entry to the fusion's /api/sensors

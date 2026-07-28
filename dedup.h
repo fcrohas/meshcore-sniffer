@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: delayed best-pick dedup for PFB bin-leakage replicas.
+ * meshcore-sniffer: delayed best-pick dedup for PFB bin-leakage replicas.
  *
  * Two-tier matching:
  *   Tier 1 -- payload XOR-fold fingerprint with Hamming threshold.

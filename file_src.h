@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * File-replay backend for meshtastic-sniffer.
+ * File-replay backend for meshcore-sniffer.
  *
  */
 

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: PCAP file/pipe output for Wireshark workflows.
+ * meshcore-sniffer: PCAP file/pipe output for Wireshark workflows.
  *
  * Writes received LoRa frames in libpcap format using DLT_USER0 (147)
  * so analysts can `wireshark -k -i fifo` against a live sniffer or

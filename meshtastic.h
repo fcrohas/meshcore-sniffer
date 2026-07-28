@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (c) 2026 CEMAXECUTER LLC
  *
- * meshtastic-sniffer: protocol constants
+ * meshcore-sniffer: protocol constants
  * (region bands, modem presets, port numbers, default channel grids)
  *
  */

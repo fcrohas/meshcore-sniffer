@@ -77,7 +77,7 @@ static void post_one(CURL *curl, qitem_t *q)
 {
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    hdrs = curl_slist_append(hdrs, "User-Agent: meshtastic-sniffer/webhook");
+    hdrs = curl_slist_append(hdrs, "User-Agent: meshcore-sniffer/webhook");
 
     curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, g_url);
