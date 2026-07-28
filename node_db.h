@@ -30,6 +30,13 @@ typedef struct node_record {
 void node_db_remember(uint32_t id, const char *long_name,
                       const char *short_name, uint32_t hw_model, uint32_t role);
 
+/* Same in-memory update as node_db_remember(), but does NOT call
+ * node_db_persist_hook(). For db_sqlite_load_nodes() only: reloading
+ * the `nodes` table into this cache at startup is not a fresh
+ * sighting, so it must not re-stamp the DB's last_seen with "now". */
+void node_db_load(uint32_t id, const char *long_name,
+                  const char *short_name, uint32_t hw_model, uint32_t role);
+
 /* Returns true and fills *out if known; returns false otherwise. */
 bool node_db_lookup(uint32_t id, node_record_t *out);
 

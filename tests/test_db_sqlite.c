@@ -179,7 +179,43 @@ static void test_node_reload_and_event_replay(void)
     const char *json = "{\"protocol\":\"meshcore\",\"mc_type\":\"GRP_TXT\",\"text\":\"replay me\"}";
     db_sqlite_publish(&ev, json, strlen(json));
 
+    /* Regression check for the "last_seen reset to page-load time"
+     * bug: node_db_persist_hook() stamps last_seen with wall-clock
+     * "now" on every node_db_remember() call, which is correct for a
+     * real sighting but was also firing every time
+     * db_sqlite_load_nodes() reloaded the table at startup -- clobbering
+     * every node's real last_seen with the restart time. Capture
+     * 0x1234's last_seen now (set by the node_db_remember() call
+     * above), then assert the reload below leaves it untouched. */
+    double last_seen_before;
+    {
+        sqlite3 *db;
+        CHECK(sqlite3_open(TEST_DB_PATH, &db) == SQLITE_OK, "reopen the DB to capture last_seen before reload");
+        sqlite3_stmt *stmt;
+        CHECK(sqlite3_prepare_v2(db, "SELECT last_seen FROM nodes WHERE id=4660", -1, &stmt, NULL) == SQLITE_OK,
+              "prepare last_seen select (id=0x1234=4660) before reload");
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW, "node 0x1234 row exists before reload");
+        last_seen_before = sqlite3_column_double(stmt, 0);
+        CHECK(last_seen_before > 0.0, "last_seen was stamped by node_db_remember()");
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+    }
+
     CHECK(db_sqlite_load_nodes(), "db_sqlite_load_nodes succeeds");
+
+    {
+        sqlite3 *db;
+        CHECK(sqlite3_open(TEST_DB_PATH, &db) == SQLITE_OK, "reopen the DB to check last_seen after reload");
+        sqlite3_stmt *stmt;
+        CHECK(sqlite3_prepare_v2(db, "SELECT last_seen FROM nodes WHERE id=4660", -1, &stmt, NULL) == SQLITE_OK,
+              "prepare last_seen select (id=0x1234=4660) after reload");
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW, "node 0x1234 row still exists after reload");
+        double last_seen_after = sqlite3_column_double(stmt, 0);
+        CHECK(last_seen_after == last_seen_before,
+              "db_sqlite_load_nodes() must not clobber last_seen with the reload/restart time");
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+    }
 
     node_record_t rec;
     CHECK(node_db_lookup(0x1234, &rec) && strcmp(rec.long_name, "Alice Node") == 0,

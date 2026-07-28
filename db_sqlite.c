@@ -347,7 +347,7 @@ bool db_sqlite_load_nodes(void)
         const char *sn     = (const char *)sqlite3_column_text(stmt, 2);
         uint32_t hw_model  = (uint32_t)sqlite3_column_int(stmt, 3);
         uint32_t role      = (uint32_t)sqlite3_column_int(stmt, 4);
-        node_db_remember(id, ln, sn, hw_model, role);
+        node_db_load(id, ln, sn, hw_model, role);
         ++n;
     }
     sqlite3_finalize(stmt);
