@@ -2310,9 +2310,21 @@ static const char DASHBOARD_HTML[] =
  * the background hashtag-dictionary attack cracked long ago -- until
  * fresh traffic happens to arrive on that exact channel again. GET
  * /api/meshcore-channels reads the durable hash->name mapping straight
- * out of the events table (see db_sqlite_query_channel_names_json())
- * and seeds `channels{}` the same shape the live handlers build, so
- * renderChannelsTab() shows known names immediately on load. */
+ * out of the events table (see db_sqlite_query_channel_names_json()),
+ * now including a real total/decrypted/last_ts/protocol from the DB's
+ * full history, and seeds `channels{}` the same shape the live
+ * handlers build, so renderChannelsTab() shows known names AND
+ * accurate counts immediately on load.
+ *
+ * Only fills in a channel that has no in-memory entry yet -- one that
+ * already has live/replayed traffic this session keeps its own
+ * bookkeeping rather than being overwritten by a possibly-stale
+ * snapshot from whenever this fetch resolves. Before this, a fresh
+ * entry got hardcoded total:0/ts:0 stand-ins with no protocol at all,
+ * which rendered as "0 messages", a decades-long "ago" (fmtAgo epoch
+ * 0), and a bare "--" for protocol -- despite the channel having real
+ * history, reachable by clicking it (which pulls messages straight
+ * from the DB via loadOlderMessages(), unaffected by this stand-in). */
 "async function bootstrapChannelsFromApi(){\n"
 "  try {\n"
 "    const r = await fetch('/api/meshcore-channels');\n"
@@ -2321,9 +2333,16 @@ static const char DASHBOARD_HTML[] =
 "    for (const c of (data.channels||[])) {\n"
 "      const h = c.channel_hash;\n"
 "      if (h === undefined || h === null) continue;\n"
-"      if (!channels[h]) channels[h] = {total:0, decrypted:0, ts:0, slots:new Set()};\n"
+"      if (!channels[h]) {\n"
+"        channels[h] = {\n"
+"          total: c.total || 0, decrypted: c.decrypted || 0,\n"
+"          ts: c.last_ts || 0, protocol: c.protocol || 'meshcore',\n"
+"          slots: new Set(),\n"
+"        };\n"
+"      }\n"
 "      if (c.channel_name) channels[h].name = c.channel_name;\n"
 "    }\n"
+"    refreshChannels();\n"
 "    refreshChannelsTab();\n"
 "  } catch(e) {}\n"
 "}\n"

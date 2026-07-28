@@ -767,12 +767,28 @@ char *db_sqlite_query_channel_names_json(void)
      * result set are taken from the row that produced the max value --
      * so channel_name here is always the most recently observed name
      * for that hash, not an arbitrary row's (which could be NULL, from
-     * an undecrypted frame sharing the same channel_hash bucket). */
+     * an undecrypted frame sharing the same channel_hash bucket).
+     *
+     * The outer query joins back onto ALL events for a named hash (not
+     * just the ones carrying a name) to get a real total/decrypted/
+     * last_ts -- otherwise a channel whose PSK was only cracked partway
+     * through its history would undercount messages seen before the
+     * crack. Without this, the dashboard's Channels-tab bootstrap
+     * (bootstrapChannelsFromApi() in web.c) had nothing but a name for
+     * a channel with no *live* traffic yet this session, and seeded
+     * total=0/ts=0 stand-ins that rendered as "0 messages" and a
+     * decades-long "ago" despite the channel having real history. */
     static const char *SQL =
-        "SELECT channel_hash, channel_name, MAX(ts) FROM events "
-        "WHERE protocol='meshcore' AND channel_hash IS NOT NULL "
-        "AND channel_name IS NOT NULL AND channel_name != '' "
-        "GROUP BY channel_hash";
+        "SELECT e.channel_hash, names.channel_name, COUNT(*), "
+        "SUM(CASE WHEN e.decrypted = 1 THEN 1 ELSE 0 END), MAX(e.ts) "
+        "FROM events e JOIN ("
+        "  SELECT channel_hash, channel_name, MAX(ts) AS name_ts FROM events "
+        "  WHERE protocol='meshcore' AND channel_hash IS NOT NULL "
+        "  AND channel_name IS NOT NULL AND channel_name != '' "
+        "  GROUP BY channel_hash"
+        ") names ON names.channel_hash = e.channel_hash "
+        "WHERE e.protocol='meshcore' AND e.channel_hash IS NOT NULL "
+        "GROUP BY e.channel_hash";
     if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
         fprintf(stderr, "db_sqlite: channel-names query failed: %s\n", sqlite3_errmsg(g_db));
         return NULL;
@@ -787,11 +803,14 @@ char *db_sqlite_query_channel_names_json(void)
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         long channel_hash = (long)sqlite3_column_int64(stmt, 0);
         const unsigned char *cname = sqlite3_column_text(stmt, 1);
+        long total = (long)sqlite3_column_int64(stmt, 2);
+        long decrypted = (long)sqlite3_column_int64(stmt, 3);
+        double last_ts = sqlite3_column_double(stmt, 4);
 
         char esc[256];
         json_escape_str(cname ? (const char *)cname : "", esc, sizeof(esc));
 
-        size_t need = (size_t)n + strlen(esc) + 64;
+        size_t need = (size_t)n + strlen(esc) + 128;
         if (need > cap) {
             size_t newcap = cap * 2;
             while (newcap < need) newcap *= 2;
@@ -801,8 +820,10 @@ char *db_sqlite_query_channel_names_json(void)
             cap = newcap;
         }
         n += snprintf(buf + n, cap - (size_t)n,
-                      "%s{\"channel_hash\":%ld,\"channel_name\":\"%s\"}",
-                      first ? "" : ",", channel_hash, esc);
+                      "%s{\"channel_hash\":%ld,\"channel_name\":\"%s\","
+                      "\"protocol\":\"meshcore\",\"total\":%ld,\"decrypted\":%ld,"
+                      "\"last_ts\":%.3f}",
+                      first ? "" : ",", channel_hash, esc, total, decrypted, last_ts);
         first = false;
     }
     sqlite3_finalize(stmt);
