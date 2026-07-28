@@ -122,6 +122,80 @@ static void test_advert_latlon(void)
     CHECK(strcmp(ev.mc_node_name, "Paris Repeater") == 0, "ADVERT latlon: node name == 'Paris Repeater'");
 }
 
+/* Regression test for the "repeater with bad GPS position" bug: a
+ * single flipped bit in ADVERT's lat/lon field (radio corruption, or
+ * the CRC bruteforce recovery guessing wrong on a CRC-fail frame)
+ * previously produced wild, unmistakably bogus coordinates that got
+ * persisted/published as the node's live position -- e.g. a repeater
+ * jumping thousands of km, or landing on null island (0,0).
+ * meshcore_decode_advert() now drops just the lat/lon on an
+ * implausible fix rather than propagating it. */
+static void test_advert_latlon_implausible(void)
+{
+    uint8_t frame[300];
+    size_t  n = 0;
+
+    frame[n++] = (uint8_t)((MC_PAYLOAD_ADVERT << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame[n++] = 0; /* path_len byte */
+
+    for (int i = 0; i < MC_PUB_KEY_SIZE; ++i) frame[n++] = (uint8_t)(0xB0 + i);
+
+    uint32_t ts = 1700000100u;
+    frame[n++] = (uint8_t)(ts);
+    frame[n++] = (uint8_t)(ts >> 8);
+    frame[n++] = (uint8_t)(ts >> 16);
+    frame[n++] = (uint8_t)(ts >> 24);
+
+    for (int i = 0; i < MC_SIGNATURE_SIZE; ++i) frame[n++] = (uint8_t)(0x66 + i);
+
+    /* Out-of-range latitude (impossible: > 90 degrees), as seen from a
+     * real corrupted capture. */
+    frame[n++] = (uint8_t)(ADV_TYPE_REPEATER | ADV_LATLON_MASK | ADV_NAME_MASK);
+    int32_t lat_e6 = (int32_t)(-1176.023371 * 1e6);
+    int32_t lon_e6 = (int32_t)(-879.116277 * 1e6);
+    memcpy(frame + n, &lat_e6, 4); n += 4;
+    memcpy(frame + n, &lon_e6, 4); n += 4;
+    const char *name = "Bad Fix Repeater";
+    memcpy(frame + n, name, strlen(name));
+    n += strlen(name);
+
+    meshcore_packet_t pkt;
+    int rc = meshcore_packet_parse(frame, n, &pkt);
+    CHECK(rc == 0, "ADVERT implausible latlon: meshcore_packet_parse succeeds");
+
+    mesh_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    bool ok = meshcore_decode_advert(&pkt, &ev);
+    CHECK(ok, "ADVERT implausible latlon: meshcore_decode_advert succeeds");
+    CHECK(!ev.mc_has_latlon, "ADVERT implausible latlon: has_latlon NOT set for out-of-range coordinates");
+    CHECK(ev.mc_adv_type == ADV_TYPE_REPEATER, "ADVERT implausible latlon: adv_type still decoded as REPEATER");
+    CHECK(strcmp(ev.mc_node_name, "Bad Fix Repeater") == 0,
+          "ADVERT implausible latlon: name still decoded despite dropped position");
+
+    /* Second case: exact (0,0) -- the classic "no GPS fix" sentinel,
+     * seen in practice from a node that never got a real fix. */
+    n = 0;
+    frame[n++] = (uint8_t)((MC_PAYLOAD_ADVERT << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame[n++] = 0;
+    for (int i = 0; i < MC_PUB_KEY_SIZE; ++i) frame[n++] = (uint8_t)(0xC0 + i);
+    frame[n++] = (uint8_t)(ts);
+    frame[n++] = (uint8_t)(ts >> 8);
+    frame[n++] = (uint8_t)(ts >> 16);
+    frame[n++] = (uint8_t)(ts >> 24);
+    for (int i = 0; i < MC_SIGNATURE_SIZE; ++i) frame[n++] = (uint8_t)(0x77 + i);
+    frame[n++] = (uint8_t)(ADV_TYPE_REPEATER | ADV_LATLON_MASK);
+    int32_t zero = 0;
+    memcpy(frame + n, &zero, 4); n += 4;
+    memcpy(frame + n, &zero, 4); n += 4;
+
+    meshcore_packet_t pkt2;
+    CHECK(meshcore_packet_parse(frame, n, &pkt2) == 0, "ADVERT null-island: meshcore_packet_parse succeeds");
+    mesh_event_t ev2;
+    memset(&ev2, 0, sizeof(ev2));
+    CHECK(meshcore_decode_advert(&pkt2, &ev2), "ADVERT null-island: meshcore_decode_advert succeeds");
+    CHECK(!ev2.mc_has_latlon, "ADVERT null-island: has_latlon NOT set for (0,0)");
+}
+
 static void test_grp_txt_crypto(void)
 {
     /* Known 32-byte secret. */
@@ -618,6 +692,7 @@ int main(void)
 {
     test_advert();
     test_advert_latlon();
+    test_advert_latlon_implausible();
     test_advert_signature();
     test_grp_txt_crypto();
     test_grp_data_dispatch();

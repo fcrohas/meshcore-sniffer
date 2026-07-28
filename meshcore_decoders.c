@@ -94,6 +94,20 @@ bool meshcore_advert_verify_signature(const uint8_t *pubkey, uint32_t timestamp,
     return ok;
 }
 
+/* Real-world range check, plus the classic "no GPS fix" (0,0)
+ * sentinel. Used to drop an ADVERT's lat/lon when radio corruption (or
+ * the CRC bruteforce recovery guessing the wrong bit on a CRC-fail
+ * frame) has flipped a bit in this field -- otherwise wild,
+ * unmistakably bogus coordinates get persisted/published as a node's
+ * live position (seen in practice: a repeater's marker jumping
+ * thousands of km, or landing on null island). */
+static bool mc_latlon_plausible(double lat, double lon)
+{
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) return false;
+    if (lat == 0.0 && lon == 0.0) return false;
+    return true;
+}
+
 /* ---- ADVERT (payload_type 4): in-the-clear ---- */
 bool meshcore_decode_advert(const meshcore_packet_t *pkt, mesh_event_t *ev)
 {
@@ -141,9 +155,17 @@ bool meshcore_decode_advert(const meshcore_packet_t *pkt, mesh_event_t *ev)
                 i += 4;
                 int32_t lon_e6 = (int32_t)rd_le32(app_data + i);
                 i += 4;
-                ev->mc_has_latlon = true;
-                ev->mc_lat = (double)lat_e6 / 1e6;
-                ev->mc_lon = (double)lon_e6 / 1e6;
+                double lat = (double)lat_e6 / 1e6;
+                double lon = (double)lon_e6 / 1e6;
+                /* Drop just the lat/lon on an implausible fix rather
+                 * than failing the whole ADVERT -- name/adv_type/
+                 * sig_valid decoded from the same frame are still
+                 * good. */
+                if (mc_latlon_plausible(lat, lon)) {
+                    ev->mc_has_latlon = true;
+                    ev->mc_lat = lat;
+                    ev->mc_lon = lon;
+                }
             } else {
                 i = app_data_len; /* truncated: stop parsing further fields */
             }
