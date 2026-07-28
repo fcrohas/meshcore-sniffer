@@ -1123,55 +1123,77 @@ static const char DASHBOARD_HTML[] =
  * decodes both a live ADVERT event's numeric fallback and the
  * bootstrap API's persisted "role" column (see bootstrapNodesFromApi
  * and the node_db_remember() call in feed_meshcore_json.c) into the
- * same adv_type string placeMarker() below checks. */
+ * same adv_type string nodeKind() below checks. */
 "const MC_ADV_TYPE_NAMES = ['NONE','CHAT','REPEATER','ROOM','SENSOR'];\n"
+/* nodeKind -- classifies a node for map styling. REPEATER wins over
+ * ROOM/SENSOR whenever hopDepth is known (topoNoteRelayPath() has
+ * observed this node actually relaying a real packet's path) --
+ * most community repeaters just run default firmware config
+ * regardless of their physical role, so relying on the self-reported
+ * adv_type alone leaves genuinely-relaying nodes stuck looking like
+ * people. Anything else (including nodes with no adv_type at all,
+ * e.g. bootstrapNodesFromApi()'s /api/nodes data) is 'people'. */
+"function nodeKind(n) {\n"
+"  if (n && (n.adv_type === 'REPEATER' || n.hopDepth !== undefined)) return 'repeater';\n"
+"  if (n && n.adv_type === 'SENSOR') return 'sensor';\n"
+"  if (n && n.adv_type === 'ROOM') return 'room';\n"
+"  return 'people';\n"
+"}\n"
+/* Per-kind marker styling. Repeater/sensor render as a small red
+ * circle with a white perimeter; people render the same shape in
+ * blue; rooms render as a red square (same color scheme as
+ * repeater/sensor) via a divIcon, since a plain circleMarker can't
+ * do square. All four replace the plain default Leaflet pin nodes
+ * used to fall back to. */
+"const NODE_STYLES = {\n"
+"  repeater: {radius:6, color:'#fff', weight:2, fillColor:'#ef4444', fillOpacity:1},\n"
+"  sensor:   {radius:6, color:'#fff', weight:2, fillColor:'#ef4444', fillOpacity:1},\n"
+"  people:   {radius:6, color:'#fff', weight:2, fillColor:'#3b82f6', fillOpacity:1},\n"
+"};\n"
+"const REPEATER_BLINK_STYLE = {radius:7, color:'#fff', weight:2, fillColor:'#22c55e', fillOpacity:1};\n"
+"const ROOM_ICON = L.divIcon({\n"
+"  className: 'room-marker-icon',\n"
+"  html: '<span style=\"display:block;width:12px;height:12px;background:#ef4444;border:2px solid #fff;box-sizing:border-box;\"></span>',\n"
+"  iconSize: [12, 12], iconAnchor: [6, 6],\n"
+"});\n"
 /* placeMarker -- shared node-marker creation/update for both the live
  * SSE path (es.onmessage) and bootstrapNodesFromApi()'s restart
- * recovery. Repeaters render as a small red circle with a white
- * perimeter instead of the default pin, so they're visually distinct
- * at a glance. Default L.marker() and L.circleMarker() are different
- * Leaflet classes with no in-place conversion, so a style change
- * (repeater-ness learned only after the marker already exists)
- * removes and recreates rather than mutating.
- *
- * "Repeater" is true on EITHER signal:
- *   - adv_type === 'REPEATER': the node's own ADVERT self-reports it.
- *   - hopDepth !== undefined: topoNoteRelayPath() (defined further
- *     down, driving the Topology tab) has observed this node actually
- *     relaying a real
- *     packet's path. In practice the self-reported flag is rarely set
- *     -- most community repeaters just run default firmware config
- *     regardless of their physical role -- so relying on it alone
- *     leaves genuinely-relaying nodes stuck as plain pins. Observed
- *     behavior is ground truth and catches those too. */
-"const REPEATER_STYLE = {radius:6, color:'#fff', weight:2, fillColor:'#ef4444', fillOpacity:1};\n"
-"const REPEATER_BLINK_STYLE = {radius:7, color:'#fff', weight:2, fillColor:'#22c55e', fillOpacity:1};\n"
+ * recovery. Kind (see nodeKind()) determines shape/color; a room's
+ * L.Marker+divIcon and a circle-kind's L.CircleMarker are different
+ * Leaflet classes with no in-place conversion, so a kind change
+ * (e.g. adv_type learned only after the marker already exists)
+ * removes and recreates rather than mutating. */
 "function placeMarker(id, ll, n) {\n"
-"  const wantsRepeaterStyle = !!(n && (n.adv_type === 'REPEATER' || n.hopDepth !== undefined));\n"
+"  const kind = nodeKind(n);\n"
 "  const existing = markers[id];\n"
 "  if (existing) {\n"
-"    if ((existing instanceof L.CircleMarker) === wantsRepeaterStyle) { existing.setLatLng(ll); return existing; }\n"
+"    if (existing._kind === kind) { existing.setLatLng(ll); return existing; }\n"
 "    map.removeLayer(existing);\n"
 "  }\n"
-"  const marker = wantsRepeaterStyle ? L.circleMarker(ll, REPEATER_STYLE) : L.marker(ll);\n"
+"  const marker = kind === 'room' ? L.marker(ll, {icon: ROOM_ICON}) : L.circleMarker(ll, NODE_STYLES[kind]);\n"
+"  marker._kind = kind;\n"
 "  marker.addTo(map).bindPopup(`<b>${id}</b><br>${(n && n.name) || ''}`);\n"
 "  markers[id] = marker;\n"
 "  return marker;\n"
 "}\n"
-/* blinkRepeater -- 10s green blink on a repeater marker relaying a
- * live frame (see traceLivePath() below). No-op for non-repeater
- * markers (plain L.marker has no .setStyle()). Re-triggering while
- * already blinking restarts the 10s window instead of stacking
- * timers, so a busy repeater just stays lit rather than flickering
- * from overlapping timeouts. */
+/* blinkRepeater -- 10s green blink on a repeater/sensor marker relaying
+ * a live frame (see traceLivePath() below). No-op for markers with no
+ * .setStyle() (rooms use L.Marker+divIcon, which has none). Restores
+ * the marker's own kind style (NODE_STYLES[m._kind]) when the blink
+ * ends, not a hardcoded repeater red, so a people-kind marker that
+ * happens to resolve as a hop blinks back to blue rather than staying
+ * red. Re-triggering while already blinking restarts the 10s window
+ * instead of stacking timers, so a busy repeater just stays lit
+ * rather than flickering from overlapping timeouts. */
 "function blinkRepeater(id) {\n"
 "  const m = markers[id];\n"
 "  if (!m || !m.setStyle) return;\n"
+"  const baseStyle = NODE_STYLES[m._kind] || NODE_STYLES.repeater;\n"
 "  if (m._blinkTimer) clearInterval(m._blinkTimer);\n"
 "  if (m._blinkTimeout) clearTimeout(m._blinkTimeout);\n"
 "  let on = false;\n"
-"  m._blinkTimer = setInterval(() => { on = !on; m.setStyle(on ? REPEATER_BLINK_STYLE : REPEATER_STYLE); }, 400);\n"
-"  m._blinkTimeout = setTimeout(() => { clearInterval(m._blinkTimer); m._blinkTimer = null; m.setStyle(REPEATER_STYLE); }, 10000);\n"
+"  m._blinkTimer = setInterval(() => { on = !on; m.setStyle(on ? REPEATER_BLINK_STYLE : baseStyle); }, 400);\n"
+"  m._blinkTimeout = setTimeout(() => { clearInterval(m._blinkTimer); m._blinkTimer = null; m.setStyle(baseStyle); }, 10000);\n"
 "}\n"
 /* frameHopIds -- best-effort list of known node ids (path order) that
  * relayed this frame, for traceLivePath() below. Meshtastic
