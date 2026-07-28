@@ -65,14 +65,17 @@ static uint32_t mc_derive_from_id(const mesh_event_t *ev)
 }
 
 void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
-                                   const char *station_id)
+                                   const char *station_id, double ts_override)
 {
     jw_open(j);
     if (station_id) jw_field_str(j, "station", station_id);
 
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    double ts = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    double ts = ts_override;
+    if (ts <= 0.0) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        ts = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    }
     jw_field_f64(j, "ts", ts);
 
     jw_field_str(j, "protocol",     "meshcore");
@@ -226,6 +229,17 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
      * (impossible in practice) all-zero-pubkey case. */
     if (ev->decrypted && ev->mc_payload_type == MC_PAYLOAD_ADVERT &&
         ev->mc_has_name && from_id) {
-        node_db_remember(from_id, ev->mc_node_name, "", 0, 0);
+        /* role: persists mc_adv_type (NONE/CHAT/REPEATER/ROOM/SENSOR,
+         * same small enum as adv_type_name above) into the nodes
+         * table's generic "role" column, purely a MeshCore <-> Meshtastic
+         * naming coincidence -- Meshtastic's own NODEINFO_APP role enum
+         * is unrelated and larger. Not a collision in practice: a
+         * running instance is always single-protocol (--protocol is
+         * mutually exclusive), and node_db_remember() never overwrites
+         * role with 0 (partial-update semantics), so this only ever
+         * *adds* information. Read back by bootstrapNodesFromApi() in
+         * web.c to style a repeater's map marker correctly from the
+         * very first page load, not just after a live ADVERT arrives. */
+        node_db_remember(from_id, ev->mc_node_name, "", 0, ev->mc_adv_type);
     }
 }

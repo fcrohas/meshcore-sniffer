@@ -812,6 +812,83 @@ char *db_sqlite_query_channel_names_json(void)
     return buf;
 }
 
+db_sqlite_undecrypted_row_t *db_sqlite_query_undecrypted_channel_rows(uint8_t channel_hash, size_t *out_n)
+{
+    if (out_n) *out_n = 0;
+    if (!g_db) return NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT id, ts, sf, cr, bw_hz, rssi_db, snr_db, raw_hex FROM events "
+        "WHERE protocol='meshcore' AND channel_hash=?1 AND decrypted=0 "
+        "AND raw_hex IS NOT NULL AND payload_type IN (5, 6)"; /* MC_PAYLOAD_GRP_TXT, MC_PAYLOAD_GRP_DATA */
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: undecrypted-rows query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+    sqlite3_bind_int(stmt, 1, (int)channel_hash);
+
+    size_t cap = 16, n = 0;
+    db_sqlite_undecrypted_row_t *rows = malloc(cap * sizeof(*rows));
+    if (!rows) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char *raw_hex = sqlite3_column_text(stmt, 7);
+        if (!raw_hex || !*raw_hex) continue;
+        if (n == cap) {
+            cap *= 2;
+            db_sqlite_undecrypted_row_t *nb = realloc(rows, cap * sizeof(*rows));
+            if (!nb) break;
+            rows = nb;
+        }
+        db_sqlite_undecrypted_row_t *r = &rows[n];
+        r->id      = sqlite3_column_int64(stmt, 0);
+        r->ts      = sqlite3_column_double(stmt, 1);
+        r->sf      = sqlite3_column_int(stmt, 2);
+        r->cr      = sqlite3_column_int(stmt, 3);
+        r->bw_hz   = sqlite3_column_int(stmt, 4);
+        r->rssi_db = sqlite3_column_double(stmt, 5);
+        r->snr_db  = sqlite3_column_double(stmt, 6);
+        snprintf(r->raw_hex, sizeof(r->raw_hex), "%s", (const char *)raw_hex);
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+
+    if (n == 0) { free(rows); rows = NULL; }
+    if (out_n) *out_n = n;
+    return rows;
+}
+
+bool db_sqlite_apply_redecrypt(int64_t id, const char *channel_name,
+                               const char *text, const char *json, size_t json_len)
+{
+    if (!g_db) return false;
+
+    static const char *SQL =
+        "UPDATE events SET decrypted=1, channel_name=?1, text=?2, json=?3 WHERE id=?4";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: redecrypt update prepare failed: %s\n", sqlite3_errmsg(g_db));
+        return false;
+    }
+
+    pthread_mutex_lock(&g_mu);
+    if (channel_name && channel_name[0]) sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_TRANSIENT);
+    else                                  sqlite3_bind_null(stmt, 1);
+    if (text && text[0]) sqlite3_bind_text(stmt, 2, text, -1, SQLITE_TRANSIENT);
+    else                  sqlite3_bind_null(stmt, 2);
+    if (json && json_len) sqlite3_bind_text(stmt, 3, json, (int)json_len, SQLITE_TRANSIENT);
+    else                   sqlite3_bind_null(stmt, 3);
+    sqlite3_bind_int64(stmt, 4, (sqlite3_int64)id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0;
+    if (!ok) fprintf(stderr, "db_sqlite: redecrypt update failed for id=%lld: %s\n",
+                     (long long)id, sqlite3_errmsg(g_db));
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
+
 #else /* !HAVE_SQLITE3 */
 
 bool db_sqlite_init(const char *path)
@@ -844,5 +921,10 @@ char *db_sqlite_query_stats_by_type_json(double since_ts) { (void)since_ts; retu
 char *db_sqlite_query_stats_by_channel_json(double since_ts) { (void)since_ts; return NULL; }
 char *db_sqlite_query_stats_crc_json(double since_ts) { (void)since_ts; return NULL; }
 char *db_sqlite_query_channel_names_json(void) { return NULL; }
+db_sqlite_undecrypted_row_t *db_sqlite_query_undecrypted_channel_rows(uint8_t channel_hash, size_t *out_n)
+{ (void)channel_hash; if (out_n) *out_n = 0; return NULL; }
+bool db_sqlite_apply_redecrypt(int64_t id, const char *channel_name,
+                               const char *text, const char *json, size_t json_len)
+{ (void)id; (void)channel_name; (void)text; (void)json; (void)json_len; return false; }
 
 #endif /* HAVE_SQLITE3 */

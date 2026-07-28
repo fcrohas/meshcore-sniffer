@@ -27,6 +27,7 @@
 #include "meshcore.h"
 #include "meshcore_decoders.h"
 #include "meshcore_packet.h"
+#include "meshcore_redecrypt.h"
 
 #include <pthread.h>
 #include <stdio.h>

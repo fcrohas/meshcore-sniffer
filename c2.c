@@ -19,6 +19,7 @@
 #include "cot.h"
 #include "keyset.h"
 #include "meshcore.h"
+#include "meshcore_redecrypt.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -186,6 +187,11 @@ void c2_meshcore_channel_add(const char *body, c2_response_t *out)
             if (meshcore_channelset_add_spec(cs, tok, &hash, display) == 0) {
                 ++added;
                 emit_channel_added(hash, display);
+                /* Retroactively fix any already-stored, still-
+                 * encrypted history on this hash -- see
+                 * meshcore_redecrypt.c. A no-op scan when there's
+                 * nothing to fix. */
+                meshcore_redecrypt_channel(hash, cs);
             }
             continue;
         }
@@ -221,6 +227,7 @@ void c2_meshcore_channel_add(const char *body, c2_response_t *out)
             if (meshcore_channelset_add_hashtag(cs, variants[vi], &hash, display) == 0) {
                 tok_added = true;
                 if (vi == 0) emit_channel_added(hash, display);
+                meshcore_redecrypt_channel(hash, cs);
             }
         }
         if (tok_added) ++added;

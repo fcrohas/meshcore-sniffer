@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Open (creating if absent) the SQLite DB at path and create the
  * events table/indexes if missing. Safe to call once at startup;
@@ -144,5 +145,42 @@ char *db_sqlite_query_stats_crc_json(double since_ts);
  * hash). Malloc'd, NUL-terminated JSON array string (caller frees);
  * NULL only if db_sqlite_init() was never called/failed. */
 char *db_sqlite_query_channel_names_json(void);
+
+/* Retroactive re-decrypt support (see meshcore_redecrypt.c): a channel
+ * whose secret becomes known *after* some of its traffic was already
+ * captured -- via a manual dashboard add or the background hashtag-
+ * dictionary attack -- only decrypts frames from that point forward
+ * unless something goes back and retries every already-stored,
+ * still-undecrypted row on that channel_hash. These two functions are
+ * the generic (protocol-decode-free) DB half of that: db_sqlite.c
+ * itself has no MeshCore crypto/decode knowledge, so the actual
+ * parse-and-decrypt attempt happens in meshcore_redecrypt.c, which
+ * calls these to fetch candidates and persist any hits. */
+
+typedef struct {
+    int64_t id;
+    double  ts;
+    int     sf, cr, bw_hz;
+    double  rssi_db, snr_db;
+    char    raw_hex[513]; /* matches mesh_event_t.raw_hex (mesh_packet.h) */
+} db_sqlite_undecrypted_row_t;
+
+/* Every still-undecrypted (decrypted=0) MeshCore GRP_TXT/GRP_DATA row
+ * for channel_hash, as a malloc'd array of *out_n entries (caller
+ * frees). Rows with no raw_hex (shouldn't happen for MeshCore, but
+ * guarded) are skipped. NULL and *out_n=0 if db_sqlite_init() wasn't
+ * called/failed, or nothing matches. */
+db_sqlite_undecrypted_row_t *db_sqlite_query_undecrypted_channel_rows(uint8_t channel_hash, size_t *out_n);
+
+/* Persist a successful retroactive decrypt of row `id`: flips
+ * decrypted=1, sets channel_name/text, and overwrites the stored json
+ * column with newly re-serialized JSON (caller re-serializes via
+ * feed_serialize_event_meshcore() with ts_override set to the row's
+ * original ts, so the regenerated JSON's own "ts" field stays
+ * consistent with this row's ts column instead of jumping to "now").
+ * Returns false if db_sqlite_init() wasn't called/failed, or the
+ * UPDATE affected no row. */
+bool db_sqlite_apply_redecrypt(int64_t id, const char *channel_name,
+                               const char *text, const char *json, size_t json_len);
 
 #endif /* DB_SQLITE_H */

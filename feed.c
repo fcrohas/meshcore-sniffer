@@ -59,7 +59,7 @@ static int        g_udp_feed_count = 0;
 static void serialize_event(jw_t *j, const mesh_event_t *ev)
 {
     if (ev->is_meshcore) {
-        feed_serialize_event_meshcore(j, ev, opt_station_id);
+        feed_serialize_event_meshcore(j, ev, opt_station_id, 0.0);
         return;
     }
 

@@ -55,7 +55,7 @@ static void test_grp_txt_text_and_from_visible(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"text\":\"Paquito: hello mesh\"") != NULL,
@@ -84,7 +84,7 @@ static void test_grp_txt_undecrypted_no_text(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"text\"") == NULL,
@@ -110,7 +110,7 @@ static void test_advert_node_and_position_visible(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"from\":\"!") != NULL,
@@ -156,7 +156,7 @@ static void test_ack_has_no_from(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"from\"") == NULL,

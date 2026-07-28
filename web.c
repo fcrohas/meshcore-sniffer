@@ -1119,6 +1119,119 @@ static const char DASHBOARD_HTML[] =
 "  if (trails[id].pts.length > 1)\n"
 "    trails[id].line = L.polyline(trails[id].pts, {color:'#9bf',weight:2,opacity:0.6}).addTo(map);\n"
 "}\n"
+/* MC_ADV_TYPE_NAMES -- mirrors adv_type_names[] in feed_meshcore_json.c;
+ * decodes both a live ADVERT event's numeric fallback and the
+ * bootstrap API's persisted "role" column (see bootstrapNodesFromApi
+ * and the node_db_remember() call in feed_meshcore_json.c) into the
+ * same adv_type string placeMarker() below checks. */
+"const MC_ADV_TYPE_NAMES = ['NONE','CHAT','REPEATER','ROOM','SENSOR'];\n"
+/* placeMarker -- shared node-marker creation/update for both the live
+ * SSE path (es.onmessage) and bootstrapNodesFromApi()'s restart
+ * recovery. Repeaters render as a small red circle with a white
+ * perimeter instead of the default pin, so they're visually distinct
+ * at a glance. Default L.marker() and L.circleMarker() are different
+ * Leaflet classes with no in-place conversion, so a style change
+ * (repeater-ness learned only after the marker already exists)
+ * removes and recreates rather than mutating.
+ *
+ * "Repeater" is true on EITHER signal:
+ *   - adv_type === 'REPEATER': the node's own ADVERT self-reports it.
+ *   - hopDepth !== undefined: topoNoteRelayPath() (defined further
+ *     down, driving the Topology tab) has observed this node actually
+ *     relaying a real
+ *     packet's path. In practice the self-reported flag is rarely set
+ *     -- most community repeaters just run default firmware config
+ *     regardless of their physical role -- so relying on it alone
+ *     leaves genuinely-relaying nodes stuck as plain pins. Observed
+ *     behavior is ground truth and catches those too. */
+"const REPEATER_STYLE = {radius:6, color:'#fff', weight:2, fillColor:'#ef4444', fillOpacity:1};\n"
+"const REPEATER_BLINK_STYLE = {radius:7, color:'#fff', weight:2, fillColor:'#22c55e', fillOpacity:1};\n"
+"function placeMarker(id, ll, n) {\n"
+"  const wantsRepeaterStyle = !!(n && (n.adv_type === 'REPEATER' || n.hopDepth !== undefined));\n"
+"  const existing = markers[id];\n"
+"  if (existing) {\n"
+"    if ((existing instanceof L.CircleMarker) === wantsRepeaterStyle) { existing.setLatLng(ll); return existing; }\n"
+"    map.removeLayer(existing);\n"
+"  }\n"
+"  const marker = wantsRepeaterStyle ? L.circleMarker(ll, REPEATER_STYLE) : L.marker(ll);\n"
+"  marker.addTo(map).bindPopup(`<b>${id}</b><br>${(n && n.name) || ''}`);\n"
+"  markers[id] = marker;\n"
+"  return marker;\n"
+"}\n"
+/* blinkRepeater -- 10s green blink on a repeater marker relaying a
+ * live frame (see traceLivePath() below). No-op for non-repeater
+ * markers (plain L.marker has no .setStyle()). Re-triggering while
+ * already blinking restarts the 10s window instead of stacking
+ * timers, so a busy repeater just stays lit rather than flickering
+ * from overlapping timeouts. */
+"function blinkRepeater(id) {\n"
+"  const m = markers[id];\n"
+"  if (!m || !m.setStyle) return;\n"
+"  if (m._blinkTimer) clearInterval(m._blinkTimer);\n"
+"  if (m._blinkTimeout) clearTimeout(m._blinkTimeout);\n"
+"  let on = false;\n"
+"  m._blinkTimer = setInterval(() => { on = !on; m.setStyle(on ? REPEATER_BLINK_STYLE : REPEATER_STYLE); }, 400);\n"
+"  m._blinkTimeout = setTimeout(() => { clearInterval(m._blinkTimer); m._blinkTimer = null; m.setStyle(REPEATER_STYLE); }, 10000);\n"
+"}\n"
+/* frameHopIds -- best-effort list of known node ids (path order) that
+ * relayed this frame, for traceLivePath() below. Meshtastic
+ * ROUTING_APP/TRACEROUTE_APP already carries full ids (p.route);
+ * MeshCore only ever carries 1-3 byte hash prefixes (route_path_hex,
+ * or trace_route_hashes_hex for TRACE -- see feed_meshcore_json.c),
+ * resolved the same leading-prefix-match way drawMessagePath() (above)
+ * does. Hash collisions between distinct nodes are possible for short
+ * prefixes; unresolved hops are dropped rather than guessed. */
+"function frameHopIds(p) {\n"
+"  if (p.route && p.route.length) return p.route.filter(id => nodes[id]);\n"
+"  let hex = null, hashSize = 1, hopCount = 0;\n"
+"  if (p.trace_route_hashes_hex) { hex = p.trace_route_hashes_hex; hopCount = hex.length / 2; }\n"
+"  else if (p.route_path_hex) { hex = p.route_path_hex; hashSize = p.route_path_hash_size || 1; hopCount = p.route_path_hash_count || 0; }\n"
+"  if (!hex || !hopCount) return [];\n"
+"  const ids = [];\n"
+"  for (let i = 0; i < hopCount; i++) {\n"
+"    const hop = hex.substr(i * hashSize * 2, hashSize * 2).toLowerCase();\n"
+"    let match = null;\n"
+"    for (const id of Object.keys(nodes)) {\n"
+"      if (id.length === 9 && id.slice(1, 1 + hop.length) === hop) { match = id; break; }\n"
+"    }\n"
+"    if (match) ids.push(match);\n"
+"  }\n"
+"  return ids;\n"
+"}\n"
+/* FRAME_TYPE_COLORS -- live path-trace line color per frame type
+ * (mc_type for MeshCore, port_name for Meshtastic); unlisted types
+ * fall back to the same amber drawMessagePath() (above) uses for its
+ * operator-triggered path line, for visual consistency. */
+"const FRAME_TYPE_COLORS = {\n"
+"  ADVERT: '#38bdf8', GRP_TXT: '#a78bfa', GRP_DATA: '#f472b6', TRACE: '#fbbf24',\n"
+"  ACK: '#94a3b8', TXT_MSG: '#fb923c', REQ: '#f87171', RESPONSE: '#f87171',\n"
+"  PATH: '#f87171', ANON_REQ: '#f87171',\n"
+"};\n"
+/* traceLivePath -- automatic per-frame relay visualization: draws the
+ * resolved hop path as a line (color by frame type, see
+ * FRAME_TYPE_COLORS) and blinks every resolved repeater hop green for
+ * 10s (blinkRepeater()), the line itself fading out after the same
+ * 10s. Distinct from drawMessagePath() (above), the operator-triggered
+ * single-path lookup from a past message row, which persists on the
+ * map until superseded by another manual lookup.
+ *
+ * Skips anything older than a few seconds: db_sqlite_replay_recent()
+ * (--history-replay-hours, default 24h) pushes historical rows through
+ * this same SSE stream on every reconnect/page load so the dashboard
+ * isn't blank after a restart -- without this guard, a reload floods
+ * the map with blink/trace animations for potentially hundreds of old
+ * frames all at once instead of a clean, one-time reveal, and buries
+ * whatever a genuinely live frame does under the noise. */
+"function traceLivePath(p) {\n"
+"  if (Date.now()/1000 - p.ts > 5) return;\n"
+"  const ids = frameHopIds(p);\n"
+"  for (const id of ids) blinkRepeater(id);\n"
+"  const pts = ids.map(id => (markers[id] && markers[id].getLatLng) ? markers[id].getLatLng() : null).filter(Boolean);\n"
+"  if (pts.length < 2) return;\n"
+"  const color = FRAME_TYPE_COLORS[p.mc_type || p.port_name] || '#f59e0b';\n"
+"  const line = L.polyline(pts, {color, weight:3, opacity:0.9}).addTo(map);\n"
+"  setTimeout(() => map.removeLayer(line), 10000);\n"
+"}\n"
 "// Mesh edge: draw a line from src node to dst node when both are positioned.\n"
 "// Used for relay_node hints and NEIGHBORINFO entries. SNR scales opacity.\n"
 "function noteEdge(srcId, dstId, snr){\n"
@@ -1254,6 +1367,13 @@ static const char DASHBOARD_HTML[] =
 "  selectedChannelHash = h;\n"
 "  renderChannelsTab();\n"
 "  renderChannelMessages();\n"
+/* First time this channel is opened (no page loaded yet and no live
+ * SSE traffic has arrived for it since page load either), pull its
+ * history immediately instead of showing an empty pane until the
+ * operator manually clicks "load older" -- most channels, especially
+ * one just added/cracked, won't have any live c._msgs yet. */
+"  const c = channels[h];\n"
+"  if (c && !c._older && !c._olderDone) loadOlderMessages();\n"
 "}\n"
 /* grpTxtSender -- MeshCore's GRP_TXT firmware convention (BaseChatMesh)
  * embeds the real per-message sender as a "Name: message" prefix in
@@ -1437,16 +1557,31 @@ static const char DASHBOARD_HTML[] =
 "// repeater near us right now). 2-3 byte hops keep the strict\n"
 "// reject-on-ambiguity behavior -- collisions there are vanishingly\n"
 "// unlikely, so ambiguity is a real 'can't tell', not just noise.\n"
-"function topoResolveHop(hex) {\n"
+/* topoResolveHopCandidates -- every known non-synthetic node id whose
+ * pubkey-prefix matches this hop's hash bytes, unfiltered. Split out
+ * of topoResolveHop() (below) so the repeater-marker signal in
+ * topoNoteRelayPath() can treat ALL candidates of an ambiguous 1-byte
+ * hop as "possibly relayed this" instead of only whichever one
+ * topoResolveHop()'s single-best-guess tie-break happens to pick. That
+ * tie-break (most-recently-seen) is right for drawing one clean
+ * Topology edge, but wrong here: two colliding real nodes bootstrapped
+ * in the same instant (identical .ts) sort in a fixed, arbitrary
+ * order, so the loser would NEVER get relay credit no matter how much
+ * it actually relays. */
+"function topoResolveHopCandidates(hex) {\n"
 "  const want = hex.toLowerCase();\n"
 "  const matches = [];\n"
 "  for (const id of Object.keys(nodes)) {\n"
 "    if (nodes[id].synthetic) continue;\n"
 "    if (id.slice(1).toLowerCase().startsWith(want)) matches.push(id);\n"
 "  }\n"
+"  return matches;\n"
+"}\n"
+"function topoResolveHop(hex) {\n"
+"  const matches = topoResolveHopCandidates(hex);\n"
 "  if (matches.length === 0) return null;\n"
 "  if (matches.length === 1) return matches[0];\n"
-"  if (want.length > 2) return null;\n"
+"  if (hex.length > 2) return null;\n"
 "  matches.sort((a,b) => (nodes[b].ts||0) - (nodes[a].ts||0));\n"
 "  return matches[0];\n"
 "}\n"
@@ -1494,12 +1629,27 @@ static const char DASHBOARD_HTML[] =
 "  // depth 1, closest to us; first hop = depth N, closest to origin).\n"
 "  // Track the MINIMUM ever observed so the radial layout (topoTick)\n"
 "  // stays put even if a later packet happens to take a longer route.\n"
-"  for (let i = 0; i < resolved.length; ++i) {\n"
-"    const id = resolved[i];\n"
-"    if (!id) continue;\n"
-"    const depth = resolved.length - i;\n"
+/* Iterates raw hops (not `resolved`) and every candidate per hop, not
+ * just topoResolveHop()'s single tie-broken winner -- see
+ * topoResolveHopCandidates()'s comment above for why: an ambiguous
+ * 1-byte hop's loser is still a real, plausible repeater for this
+ * purpose, it just didn't win that one arbitrary tie-break. */
+"  for (let i = 0; i < hops.length; ++i) {\n"
+"    const depth = hops.length - i;\n"
+"    for (const id of topoResolveHopCandidates(hops[i])) {\n"
 "    const n = nodes[id];\n"
-"    if (n && (n.hopDepth === undefined || depth < n.hopDepth)) n.hopDepth = depth;\n"
+"    if (n && (n.hopDepth === undefined || depth < n.hopDepth)) {\n"
+"      const firstRelaySeen = n.hopDepth === undefined;\n"
+"      n.hopDepth = depth;\n"
+/* This node just became known as an actual relay (see placeMarker()'s
+ * repeater-style check above) -- restyle its marker immediately using
+ * its current position instead of waiting for its next ADVERT. Only
+ * on the transition into "known relay", not every depth update, so an
+ * already-styled repeater's marker isn't torn down and rebuilt on
+ * every single packet it relays. */
+"      if (firstRelaySeen && markers[id] && markers[id].getLatLng) placeMarker(id, markers[id].getLatLng(), n);\n"
+"    }\n"
+"    }\n"
 "  }\n"
 "}\n"
 "function topoEnsureNode(id){\n"
@@ -1813,8 +1963,25 @@ static const char DASHBOARD_HTML[] =
 "    if (h !== undefined) {\n"
 "      if (!channels[h]) channels[h] = {total:0, decrypted:0, ts:Date.now()/1000, slots:new Set()};\n"
 "      channels[h].name = p.channel_name;\n"
+/* A channel added/cracked after some of its traffic was already
+ * captured gets its historical rows retroactively re-decrypted
+ * server-side (meshcore_redecrypt.c) -- but this browser's in-memory
+ * message cache for the channel (c._msgs, populated by live SSE
+ * delivery -- including the on-restart replay of what were, at that
+ * time, still-encrypted rows) has no way to know that happened, and
+ * nothing else invalidates it. Without this, the Messages pane keeps
+ * showing stale "(encrypted)" placeholders until the operator happens
+ * to click "load older", which bypasses the cache and re-fetches
+ * from /api/messages (now correct) -- confusing since the fix looks
+ * like it silently failed. Drop the cache and, if this channel is
+ * currently open, immediately re-pull it the same way that button
+ * does. */
+"      delete channels[h]._msgs;\n"
+"      delete channels[h]._older;\n"
+"      delete channels[h]._olderDone;\n"
 "      refreshChannels();\n"
 "      refreshChannelsTab();\n"
+"      if (selectedChannelHash === h) { renderChannelMessages(); loadOlderMessages(); }\n"
 "    }\n"
 "    return;\n"
 "  }\n"
@@ -1874,6 +2041,12 @@ static const char DASHBOARD_HTML[] =
 "  // 'from' of their own but still traversed real repeaters. See\n"
 "  // topoNoteRelayPath() below.\n"
 "  topoNoteRelayPath(p);\n"
+/* Live map: flash the same relay path across the Leaflet map itself
+ * (traceLivePath(), defined above near placeMarker/blinkRepeater) --
+ * a colored line by frame type plus a 10s green blink on every
+ * resolved repeater hop. Independent of topoNoteRelayPath() above
+ * (that's the Topology tab's force-directed graph, a different view). */
+"  traceLivePath(p);\n"
 "  // Per-channel stats: bucket by channel_hash so unknown networks are visible too.\n"
 "  if (p.channel_hash !== undefined){\n"
 "    const h = p.channel_hash;\n"
@@ -1919,11 +2092,23 @@ static const char DASHBOARD_HTML[] =
 "  else if (p.atak_callsign) n.name = p.atak_callsign + ' ['+p.atak_team+']';\n"
 "  // adv_type_name (CHAT/REPEATER/ROOM/SENSOR) drives the repeater-tree\n"
 "  // node shape in the Topology tab -- see topoRender().\n"
-"  if (p.adv_type_name) n.adv_type = p.adv_type_name;\n"
+"  if (p.adv_type_name) {\n"
+"    n.adv_type = p.adv_type_name;\n"
+/* Repeater status just became known (or changed): restyle an
+ * already-existing marker right away using its current position,
+ * rather than only reacting inside the p.lat/p.lon block below --
+ * that block only runs when THIS frame also carries a fresh position,
+ * but many repeaters don't re-broadcast position on every ADVERT (or
+ * the marker was placed earlier by bootstrapNodesFromApi(), whose
+ * /api/nodes data has no adv_type at all). Without this, a repeater
+ * discovered before this ADVERT keeps showing the default pin
+ * indefinitely, until/unless a later frame happens to carry both
+ * fields together. */
+"    if (markers[id] && markers[id].getLatLng) placeMarker(id, markers[id].getLatLng(), n);\n"
+"  }\n"
 "  if (p.lat !== undefined && p.lon !== undefined) {\n"
 "    const ll = [p.lat, p.lon];\n"
-"    if (markers[id]) markers[id].setLatLng(ll);\n"
-"    else markers[id] = L.marker(ll).addTo(map).bindPopup(`<b>${id}</b><br>${n.name||''}`);\n"
+"    placeMarker(id, ll, n);\n"
 "    updateTrail(id, ll);\n"
 "    if (Object.keys(markers).length === 1) map.setView(ll, 10);\n"
 "  }\n"
@@ -2071,6 +2256,13 @@ static const char DASHBOARD_HTML[] =
 "      if (!nodes[id]) nodes[id] = {ts:0, frames:0, synthetic:/^!(4000|8000)/i.test(id)};\n"
 "      if (n.long_name) nodes[id].name = n.long_name + (n.short_name ? ' ['+n.short_name+']' : '');\n"
 "      if (n.last_seen && n.last_seen > nodes[id].ts) nodes[id].ts = n.last_seen;\n"
+/* n.role: only meaningful for MeshCore nodes (see the persist-time
+ * comment in feed_meshcore_json.c), same small enum as the live
+ * ADVERT event's adv_type_name -- decode it the same way so a
+ * bootstrapped repeater gets its red-circle marker (placeMarker(),
+ * driven by nodes[id].adv_type) immediately on page load, not only
+ * after it happens to send another live ADVERT. */
+"      if (typeof n.role === 'number' && MC_ADV_TYPE_NAMES[n.role]) nodes[id].adv_type = MC_ADV_TYPE_NAMES[n.role];\n"
 "    }\n"
 "    const addedLatLngs = [];\n"
 "    for (const p of (data.positions||[])) {\n"
@@ -2079,7 +2271,7 @@ static const char DASHBOARD_HTML[] =
 "      if (p.ts && p.ts > nodes[id].ts) nodes[id].ts = p.ts;\n"
 "      if (!markers[id]) {\n"
 "        const ll = [p.lat, p.lon];\n"
-"        markers[id] = L.marker(ll).addTo(map).bindPopup(`<b>${id}</b><br>${nodes[id].name||''}`);\n"
+"        placeMarker(id, ll, nodes[id]);\n"
 "        addedLatLngs.push(ll);\n"
 "      }\n"
 "    }\n"

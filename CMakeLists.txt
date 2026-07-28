@@ -167,6 +167,7 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/pcap_out.c
     ${PROJECT_SOURCE_DIR}/psk_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c
+    ${PROJECT_SOURCE_DIR}/meshcore_redecrypt.c
     ${PROJECT_SOURCE_DIR}/schema.c
     ${PROJECT_SOURCE_DIR}/scanner.c
     ${PROJECT_SOURCE_DIR}/web.c
@@ -444,7 +445,8 @@ add_executable(test_meshcore_hashtag_dict
     ${PROJECT_SOURCE_DIR}/meshcore.c
     ${PROJECT_SOURCE_DIR}/meshcore_packet.c
     ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
-    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c)
+    ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c
+    ${PROJECT_SOURCE_DIR}/meshcore_redecrypt_stub.c)
 target_link_libraries(test_meshcore_hashtag_dict PRIVATE
     Threads::Threads
     ${OPENSSL_CRYPTO_LIBRARY})
