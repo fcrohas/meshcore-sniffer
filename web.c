@@ -93,8 +93,16 @@ static const char DASHBOARD_HTML[] =
 /* Live tab: 2-col grid, map left, side panels right.                 */
 ".grid{display:grid;grid-template-columns:2fr 1fr;grid-template-rows:1fr 1fr 1fr 1fr;height:100%;width:100%;gap:1px;background:#334155}\n"
 ".pane{padding:8px 10px;overflow:auto;background:#0f172a}\n"
+/* Live tab's mobile swipe-page indicator (see #live-swipe-nav markup
+ * and the @media(max-width:860px) block below). Hidden on desktop --
+ * the grid stays a normal CSS grid there, nothing to swipe between. */
+"#live-swipe-nav{display:none}\n"
+"#channelstab-swipe-nav{display:none}\n"
 "#map{height:100%;width:100%}\n"
 ".leaflet-container{background:#0f172a}\n"
+".leaflet-tooltip.node-id-label{background:rgba(15,23,42,0.85);border:1px solid #334155;color:#e2e8f0;font-size:10px;font-family:'SF Mono',Consolas,monospace;font-weight:600;padding:1px 4px;box-shadow:none}\n"
+".leaflet-tooltip.node-id-label:before{display:none}\n"
+"html.light .leaflet-tooltip.node-id-label{background:rgba(255,255,255,0.9);border-color:#cbd5e1;color:#1e293b}\n"
 "h2{margin:0 0 6px 0;font-size:12px;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;font-weight:600;border-bottom:1px solid #334155;padding-bottom:5px;display:flex;align-items:center;gap:8px}\n"
 "h2 .muted{font-weight:400;text-transform:none;letter-spacing:0;color:#64748b;font-size:11px;flex:1}\n"
 "h2 button{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:3px 9px;cursor:pointer;font-size:11px}\n"
@@ -181,6 +189,14 @@ static const char DASHBOARD_HTML[] =
 "html.light #channels-list-pane button:hover{background:#bae6fd}\n"
 "html.light #channels-list-pane .hint{color:#94a3b8}\n"
 "#channels-msgs-pane{flex:1;min-width:0;display:flex;flex-direction:column}\n"
+/* Wrapper around #channels-list-pane/#channels-msgs-pane. Transparent
+ * pass-through on desktop (flex row, fills available width) so their
+ * existing 340px+flex:1 side-by-side layout is unchanged; becomes a
+ * horizontal swipe carousel on mobile (see @media(max-width:860px)
+ * and #channelstab-swipe-nav). Not reusing .grid (Live tab's wrapper)
+ * since that's a real CSS grid on desktop (2fr/1fr columns, 4 rows)
+ * -- wrong shape for these two panes. */
+"#channelstab .swipepanes{display:flex;flex-direction:row;flex:1;min-width:0;width:100%}\n"
 "tr.chan-row{cursor:pointer}\n"
 "tr.chan-row.selected td{background:#1e3a5f}\n"
 "html.light tr.chan-row.selected td{background:#dbeafe}\n"
@@ -321,6 +337,76 @@ static const char DASHBOARD_HTML[] =
 "html.light .metric .v{color:#0284c7}\n"
 "html.light #drawer-spark{background:#f1f5f9}\n"
 "html.light #drawer-msgs .item{border-bottom-color:#e2e8f0}\n"
+/* Mobile / narrow-viewport layout. Desktop relies on the Live tab's
+ * 2-col/4-row grid filling a tall viewport with each pane scrolling
+ * internally; on a phone there isn't vertical room for that, so we
+ * flatten the grid into a stacked column and let the whole tab
+ * scroll instead. Same idea for the Channels tab's side-by-side
+ * panes. */
+"@media (max-width:860px){\n"
+"  body{font-size:13px}\n"
+"  #bar{height:auto;flex-wrap:wrap;row-gap:4px;padding:8px 12px}\n"
+"  #bar .title{flex:1 0 100%}\n"
+"  #bar #status{margin-left:0}\n"
+"  #tabs{overflow-x:auto;-webkit-overflow-scrolling:touch}\n"
+"  #tabs button{flex-shrink:0;padding:10px 14px}\n"
+"  .tab.active{overflow-y:auto;-webkit-overflow-scrolling:touch}\n"
+/* Live tab: horizontal swipeable carousel (map/nodes/channels/
+ * messages/discoveries) instead of one long vertical stack -- each
+ * pane is a full-viewport "page", native CSS scroll-snap handles the
+ * touch swipe (no custom gesture JS needed). #live.tab.active
+ * overrides the generic .tab.active{overflow-y:auto} above (wins on
+ * specificity regardless of source order) since paging is now
+ * horizontal and each pane scrolls its own content vertically --
+ * letting the outer tab ALSO scroll vertically would fight the snap.
+ * .tab.active's flex:1 (base stylesheet) already sizes #live to
+ * fill the viewport between #bar/#tabs, so no height calc() needed. */
+"  #live.tab.active{overflow:hidden;flex-direction:column}\n"
+"  #live .grid{display:flex;flex-direction:row;flex-wrap:nowrap;flex:1;min-height:0;width:100%;"
+"overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}\n"
+"  #live .grid .pane{flex:0 0 100%;width:100%;height:100%;box-sizing:border-box;"
+"scroll-snap-align:start;scroll-snap-stop:always;overflow-y:auto}\n"
+/* Styled to match #tabs button above (flat underline tab, not a
+ * rounded pill/chip) -- this is a second tier of tabs, not a row of
+ * action buttons, so it should read as one. */
+"  #live-swipe-nav{display:flex;overflow-x:auto;background:#1e293b;"
+"border-bottom:1px solid #334155;flex-shrink:0;-webkit-overflow-scrolling:touch}\n"
+"  #live-swipe-nav button{flex:0 0 auto;background:none;color:#64748b;border:none;padding:7px 14px;"
+"cursor:pointer;font:inherit;text-transform:uppercase;font-size:11px;letter-spacing:0.5px;"
+"font-weight:600;border-bottom:2px solid transparent;white-space:nowrap}\n"
+"  #live-swipe-nav button.active{color:#38bdf8;border-bottom-color:#38bdf8}\n"
+/* Channels tab: same horizontal swipe-carousel treatment as Live
+ * (see the #live rules above) -- #channelstab-swipe-nav on top,
+ * .swipepanes below as the two-page (Channels list / Messages) snap
+ * container. selectChannel() also auto-swipes to the Messages page
+ * on mobile once a channel is picked -- see the JS. */
+"  #channelstab.tab.active{overflow:hidden;flex-direction:column}\n"
+"  #channelstab .swipepanes{flex-direction:row;flex:1;min-height:0;width:100%;"
+"overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch}\n"
+"  #channels-list-pane{flex:0 0 100%;width:100%;height:100%;max-height:none;box-sizing:border-box;"
+"scroll-snap-align:start;scroll-snap-stop:always;overflow-y:auto}\n"
+"  #channels-msgs-pane{flex:0 0 100%;width:100%;height:100%;box-sizing:border-box;"
+"scroll-snap-align:start;scroll-snap-stop:always;overflow-y:auto}\n"
+"  #channelstab-swipe-nav{display:flex;overflow-x:auto;background:#1e293b;"
+"border-bottom:1px solid #334155;flex-shrink:0;-webkit-overflow-scrolling:touch}\n"
+"  #channelstab-swipe-nav button{flex:0 0 auto;background:none;color:#64748b;border:none;padding:7px 14px;"
+"cursor:pointer;font:inherit;text-transform:uppercase;font-size:11px;letter-spacing:0.5px;"
+"font-weight:600;border-bottom:2px solid transparent;white-space:nowrap}\n"
+"  #channelstab-swipe-nav button.active{color:#38bdf8;border-bottom-color:#38bdf8}\n"
+"  #config{padding:14px}\n"
+"  .metric-grid{grid-template-columns:1fr 1fr}\n"
+"  #drawer{width:100%;max-width:100vw;top:0;padding-top:44px}\n"
+"  table{font-size:11px}\n"
+"  th,td{padding:6px 4px}\n"
+"  .stats-card{min-width:100%}\n"
+"  .tbl-tools{flex-wrap:wrap}\n"
+"  .tbl-tools input{min-width:150px}\n"
+"  #tabs button,h2 button,.btn-mini,button.promote,#config button,#channels-list-pane button{min-height:28px}\n"
+"}\n"
+"@media (max-width:480px){\n"
+"  #bar .stat{display:none}\n"
+"  .metric-grid{grid-template-columns:1fr}\n"
+"}\n"
 "</style></head><body>\n"
 "<div id=\"bar\">\n"
 "  <span class=\"title\">meshcore-sniffer</span>\n"
@@ -340,8 +426,16 @@ static const char DASHBOARD_HTML[] =
 "  <button id=\"tab-config\" onclick=\"showTab('config')\">Config</button>\n"
 "  <button id=\"tab-stats\" onclick=\"showTab('stats')\">Statistics</button>\n"
 "  <button id=\"tab-analyzer\" onclick=\"showTab('analyzer')\">Analyzer</button>\n"
+"  <button id=\"tab-telemetry\" onclick=\"showTab('telemetry')\">Telemetry</button>\n"
 "</div>\n"
 "<div id=\"live\" class=\"tab active\">\n"
+"  <div id=\"live-swipe-nav\">\n"
+"    <button data-idx=\"0\" class=\"active\">Map</button>\n"
+"    <button data-idx=\"1\">Nodes</button>\n"
+"    <button data-idx=\"2\">Channels</button>\n"
+"    <button data-idx=\"3\">Messages</button>\n"
+"    <button data-idx=\"4\">Discoveries</button>\n"
+"  </div>\n"
 "  <div class=\"grid\">\n"
 "    <div class=\"pane\" style=\"grid-row:span 4;padding:0;\"><div id=\"map\"></div></div>\n"
 "    <div class=\"pane\"><h2>Nodes <span class=muted id=\"nodes-count\"></span><button onclick=\"exportCsv()\" style=\"background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:10px;\">CSV</button></h2>\n"
@@ -363,6 +457,11 @@ static const char DASHBOARD_HTML[] =
 "  </div>\n"
 "</div>\n"
 "<div id=\"channelstab\" class=\"tab\">\n"
+"  <div id=\"channelstab-swipe-nav\">\n"
+"    <button data-idx=\"0\" class=\"active\">Channels</button>\n"
+"    <button data-idx=\"1\">Messages</button>\n"
+"  </div>\n"
+"  <div class=\"swipepanes\">\n"
 "  <div class=\"pane\" id=\"channels-list-pane\"><h2>Channels <span class=muted id=\"chantab-count\"></span></h2>\n"
 "    <div class=\"row\"><input id=\"chantab-hashtag-input\" type=\"text\" placeholder=\"channel name (no key needed)\"><button id=\"chantab-hashtag-btn\" onclick=\"addHashtagChannel()\">Add</button> <span id=\"chantab-hashtag-status\" class=\"hint\"></span></div>\n"
 "    <table id=\"chantab-list\"><thead><tr><th>Hash</th><th>Name</th><th>Protocol</th><th>Frames</th><th>Last</th></tr></thead><tbody></tbody></table>\n"
@@ -472,8 +571,47 @@ static const char DASHBOARD_HTML[] =
 "  if (name==='live') setTimeout(()=>map.invalidateSize(),60);\n"
 "  if (name==='channelstab') refreshChannelsTab();\n"
 "  if (name==='stats') fetchStats();\n"
+"  if (name==='telemetry') fetchTelemetry();\n"
 "  if (name==='topology') topoStart(); else topoStop();\n"
 "}\n"
+/* Mobile swipe-page nav, shared by the Live tab (#live-swipe-nav +
+ * .grid) and the Channels tab (#channelstab-swipe-nav + .swipepanes).
+ * CSS-hidden on desktop -- see the @media(max-width:860px) block.
+ * Clicking a pill scrolls the matching page into view; scrolling/
+ * swiping the container (native CSS scroll-snap, no gesture JS)
+ * updates which pill is highlighted. Both directions harmless no-ops
+ * on desktop: the click handlers are only reachable through a hidden
+ * element, and the container never overflows horizontally there so
+ * scrollLeft stays 0. Returns a swipeTo(idx) function so other code
+ * (e.g. selectChannel()) can navigate to a page programmatically. */
+"function initSwipeNav(navId, containerSelector){\n"
+"  const nav = document.getElementById(navId);\n"
+"  const container = document.querySelector(containerSelector);\n"
+"  if (!nav || !container) return () => {};\n"
+"  const btns = Array.from(nav.querySelectorAll('button'));\n"
+"  const pages = Array.from(container.querySelectorAll(':scope > .pane'));\n"
+/* scrollIntoView() lets the browser walk the WHOLE ancestor chain
+ * (including document/body) to satisfy its vertical alignment, which
+ * on mobile was scrolling the page itself out from under the fixed
+ * header -- the clicked page ended up "on top" with #bar/#tabs/nav
+ * scrolled away instead of staying fullscreen. scrollTo() on just
+ * this one container is exact and can't touch anything else. */
+"  const swipeTo = (idx) => { if (pages[idx]) container.scrollTo({left: idx * container.clientWidth, behavior:'smooth'}); };\n"
+"  btns.forEach((b, i) => b.addEventListener('click', () => swipeTo(i)));\n"
+"  let raf = null;\n"
+"  container.addEventListener('scroll', () => {\n"
+"    if (raf) return;\n"
+"    raf = requestAnimationFrame(() => {\n"
+"      raf = null;\n"
+"      const w = container.clientWidth || 1;\n"
+"      const idx = Math.max(0, Math.min(btns.length - 1, Math.round(container.scrollLeft / w)));\n"
+"      btns.forEach((b, i) => b.classList.toggle('active', i === idx));\n"
+"    });\n"
+"  }, {passive:true});\n"
+"  return swipeTo;\n"
+"}\n"
+"initSwipeNav('live-swipe-nav', '#live .grid');\n"
+"const channelsSwipeTo = initSwipeNav('channelstab-swipe-nav', '#channelstab .swipepanes');\n"
 "// Theme toggle: dark is default, light persists in localStorage. Map\n"
 "// tile layer swaps between Carto dark/light to match. Same pattern as\n"
 "// inmarsat-sniffer / iridium-sniffer.\n"
@@ -1595,6 +1733,7 @@ static const char DASHBOARD_HTML[] =
 "  selectedChannelHash = h;\n"
 "  renderChannelsTab();\n"
 "  renderChannelMessages();\n"
+"  channelsSwipeTo(1);\n"
 /* First time this channel is opened (no page loaded yet and no live
  * SSE traffic has arrived for it since page load either), pull its
  * history immediately instead of showing an empty pane until the
