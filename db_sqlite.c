@@ -1054,6 +1054,227 @@ bool db_sqlite_apply_redecrypt(int64_t id, const char *channel_name,
     return ok;
 }
 
+db_sqlite_crc_fail_row_t *db_sqlite_query_meshcore_crc_fail_rows(size_t *out_n)
+{
+    if (out_n) *out_n = 0;
+    if (!g_db) return NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT id, ts, sf, cr, bw_hz, rssi_db, snr_db, raw_hex FROM events "
+        "WHERE protocol='meshcore' AND crc_ok=0 AND raw_hex IS NOT NULL";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: crc-fail-rows query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+
+    size_t cap = 16, n = 0;
+    db_sqlite_crc_fail_row_t *rows = malloc(cap * sizeof(*rows));
+    if (!rows) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char *raw_hex = sqlite3_column_text(stmt, 7);
+        if (!raw_hex || !*raw_hex) continue;
+        if (n == cap) {
+            cap *= 2;
+            db_sqlite_crc_fail_row_t *nb = realloc(rows, cap * sizeof(*rows));
+            if (!nb) break;
+            rows = nb;
+        }
+        db_sqlite_crc_fail_row_t *r = &rows[n];
+        r->id      = sqlite3_column_int64(stmt, 0);
+        r->ts      = sqlite3_column_double(stmt, 1);
+        r->sf      = sqlite3_column_int(stmt, 2);
+        r->cr      = sqlite3_column_int(stmt, 3);
+        r->bw_hz   = sqlite3_column_int(stmt, 4);
+        r->rssi_db = sqlite3_column_double(stmt, 5);
+        r->snr_db  = sqlite3_column_double(stmt, 6);
+        snprintf(r->raw_hex, sizeof(r->raw_hex), "%s", (const char *)raw_hex);
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+
+    if (n == 0) { free(rows); rows = NULL; }
+    if (out_n) *out_n = n;
+    return rows;
+}
+
+bool db_sqlite_apply_crc_recover(int64_t id, int crc_corrected_bits, bool decrypted,
+                                  const char *channel_name, const char *text,
+                                  const char *json, size_t json_len)
+{
+    if (!g_db) return false;
+
+    static const char *SQL =
+        "UPDATE events SET crc_ok=1, crc_corrected=1, crc_corrected_bits=?1, "
+        "decrypted=?2, channel_name=?3, text=?4, json=?5 WHERE id=?6";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: crc-recover update prepare failed: %s\n", sqlite3_errmsg(g_db));
+        return false;
+    }
+
+    pthread_mutex_lock(&g_mu);
+    sqlite3_bind_int(stmt, 1, crc_corrected_bits);
+    sqlite3_bind_int(stmt, 2, decrypted ? 1 : 0);
+    if (channel_name && channel_name[0]) sqlite3_bind_text(stmt, 3, channel_name, -1, SQLITE_TRANSIENT);
+    else                                  sqlite3_bind_null(stmt, 3);
+    if (text && text[0]) sqlite3_bind_text(stmt, 4, text, -1, SQLITE_TRANSIENT);
+    else                  sqlite3_bind_null(stmt, 4);
+    if (json && json_len) sqlite3_bind_text(stmt, 5, json, (int)json_len, SQLITE_TRANSIENT);
+    else                   sqlite3_bind_null(stmt, 5);
+    sqlite3_bind_int64(stmt, 6, (sqlite3_int64)id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0;
+    if (!ok) fprintf(stderr, "db_sqlite: crc-recover update failed for id=%lld: %s\n",
+                     (long long)id, sqlite3_errmsg(g_db));
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
+
+db_sqlite_region_scope_row_t *db_sqlite_query_region_scope_rows(size_t *out_n)
+{
+    if (out_n) *out_n = 0;
+    if (!g_db) return NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT id, ts, sf, cr, bw_hz, rssi_db, snr_db, raw_hex FROM events "
+        "WHERE protocol='meshcore' AND route_type IN (0,3) AND raw_hex IS NOT NULL";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: region-scope-rows query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+
+    size_t cap = 16, n = 0;
+    db_sqlite_region_scope_row_t *rows = malloc(cap * sizeof(*rows));
+    if (!rows) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char *raw_hex = sqlite3_column_text(stmt, 7);
+        if (!raw_hex || !*raw_hex) continue;
+        if (n == cap) {
+            cap *= 2;
+            db_sqlite_region_scope_row_t *nb = realloc(rows, cap * sizeof(*rows));
+            if (!nb) break;
+            rows = nb;
+        }
+        db_sqlite_region_scope_row_t *r = &rows[n];
+        r->id      = sqlite3_column_int64(stmt, 0);
+        r->ts      = sqlite3_column_double(stmt, 1);
+        r->sf      = sqlite3_column_int(stmt, 2);
+        r->cr      = sqlite3_column_int(stmt, 3);
+        r->bw_hz   = sqlite3_column_int(stmt, 4);
+        r->rssi_db = sqlite3_column_double(stmt, 5);
+        r->snr_db  = sqlite3_column_double(stmt, 6);
+        snprintf(r->raw_hex, sizeof(r->raw_hex), "%s", (const char *)raw_hex);
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+
+    if (n == 0) { free(rows); rows = NULL; }
+    if (out_n) *out_n = n;
+    return rows;
+}
+
+bool db_sqlite_apply_region_recover(int64_t id, const char *json, size_t json_len)
+{
+    if (!g_db) return false;
+
+    static const char *SQL = "UPDATE events SET json=?1 WHERE id=?2";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: region-recover update prepare failed: %s\n", sqlite3_errmsg(g_db));
+        return false;
+    }
+
+    pthread_mutex_lock(&g_mu);
+    if (json && json_len) sqlite3_bind_text(stmt, 1, json, (int)json_len, SQLITE_TRANSIENT);
+    else                   sqlite3_bind_null(stmt, 1);
+    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0;
+    if (!ok) fprintf(stderr, "db_sqlite: region-recover update failed for id=%lld: %s\n",
+                     (long long)id, sqlite3_errmsg(g_db));
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
+
+db_sqlite_telemetry_candidate_row_t *db_sqlite_query_telemetry_candidates(size_t *out_n)
+{
+    if (out_n) *out_n = 0;
+    if (!g_db) return NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT id, ts, sf, cr, bw_hz, rssi_db, snr_db, raw_hex FROM events "
+        "WHERE protocol='meshcore' AND payload_type=6 AND decrypted=1 "
+        "AND telemetry_json IS NULL AND raw_hex IS NOT NULL";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: telemetry-candidates query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+
+    size_t cap = 16, n = 0;
+    db_sqlite_telemetry_candidate_row_t *rows = malloc(cap * sizeof(*rows));
+    if (!rows) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char *raw_hex = sqlite3_column_text(stmt, 7);
+        if (!raw_hex || !*raw_hex) continue;
+        if (n == cap) {
+            cap *= 2;
+            db_sqlite_telemetry_candidate_row_t *nb = realloc(rows, cap * sizeof(*rows));
+            if (!nb) break;
+            rows = nb;
+        }
+        db_sqlite_telemetry_candidate_row_t *r = &rows[n];
+        r->id      = sqlite3_column_int64(stmt, 0);
+        r->ts      = sqlite3_column_double(stmt, 1);
+        r->sf      = sqlite3_column_int(stmt, 2);
+        r->cr      = sqlite3_column_int(stmt, 3);
+        r->bw_hz   = sqlite3_column_int(stmt, 4);
+        r->rssi_db = sqlite3_column_double(stmt, 5);
+        r->snr_db  = sqlite3_column_double(stmt, 6);
+        snprintf(r->raw_hex, sizeof(r->raw_hex), "%s", (const char *)raw_hex);
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+
+    if (n == 0) { free(rows); rows = NULL; }
+    if (out_n) *out_n = n;
+    return rows;
+}
+
+bool db_sqlite_apply_telemetry_recover(int64_t id, const char *telemetry_json,
+                                       const char *json, size_t json_len)
+{
+    if (!g_db) return false;
+
+    static const char *SQL = "UPDATE events SET telemetry_json=?1, json=?2 WHERE id=?3";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: telemetry-recover update prepare failed: %s\n", sqlite3_errmsg(g_db));
+        return false;
+    }
+
+    pthread_mutex_lock(&g_mu);
+    if (telemetry_json && telemetry_json[0]) sqlite3_bind_text(stmt, 1, telemetry_json, -1, SQLITE_TRANSIENT);
+    else                                       sqlite3_bind_null(stmt, 1);
+    if (json && json_len) sqlite3_bind_text(stmt, 2, json, (int)json_len, SQLITE_TRANSIENT);
+    else                   sqlite3_bind_null(stmt, 2);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0;
+    if (!ok) fprintf(stderr, "db_sqlite: telemetry-recover update failed for id=%lld: %s\n",
+                     (long long)id, sqlite3_errmsg(g_db));
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
+
 #else /* !HAVE_SQLITE3 */
 
 bool db_sqlite_init(const char *path)
@@ -1080,16 +1301,38 @@ bool db_sqlite_load_nodes(void) { return false; }
 bool db_sqlite_replay_recent(double hours) { (void)hours; return false; }
 char *db_sqlite_query_messages_json(uint32_t channel_hash, double before_ts, int limit)
 { (void)channel_hash; (void)before_ts; (void)limit; return NULL; }
+char *db_sqlite_query_node_events_json(const char *node_id, double before_ts, int limit)
+{ (void)node_id; (void)before_ts; (void)limit; return NULL; }
+char *db_sqlite_query_telemetry_json(double before_ts, int limit)
+{ (void)before_ts; (void)limit; return NULL; }
 char *db_sqlite_query_nodes_json(void) { return NULL; }
 char *db_sqlite_query_positions_json(void) { return NULL; }
 char *db_sqlite_query_stats_by_type_json(double since_ts) { (void)since_ts; return NULL; }
 char *db_sqlite_query_stats_by_channel_json(double since_ts) { (void)since_ts; return NULL; }
 char *db_sqlite_query_stats_crc_json(double since_ts) { (void)since_ts; return NULL; }
 char *db_sqlite_query_channel_names_json(void) { return NULL; }
+size_t db_sqlite_query_known_channel_names(char out[][40], size_t max_out)
+{ (void)out; (void)max_out; return 0; }
 db_sqlite_undecrypted_row_t *db_sqlite_query_undecrypted_channel_rows(uint8_t channel_hash, size_t *out_n)
 { (void)channel_hash; if (out_n) *out_n = 0; return NULL; }
 bool db_sqlite_apply_redecrypt(int64_t id, const char *channel_name,
                                const char *text, const char *json, size_t json_len)
 { (void)id; (void)channel_name; (void)text; (void)json; (void)json_len; return false; }
+db_sqlite_crc_fail_row_t *db_sqlite_query_meshcore_crc_fail_rows(size_t *out_n)
+{ if (out_n) *out_n = 0; return NULL; }
+bool db_sqlite_apply_crc_recover(int64_t id, int crc_corrected_bits, bool decrypted,
+                                  const char *channel_name, const char *text,
+                                  const char *json, size_t json_len)
+{ (void)id; (void)crc_corrected_bits; (void)decrypted; (void)channel_name;
+  (void)text; (void)json; (void)json_len; return false; }
+db_sqlite_region_scope_row_t *db_sqlite_query_region_scope_rows(size_t *out_n)
+{ if (out_n) *out_n = 0; return NULL; }
+bool db_sqlite_apply_region_recover(int64_t id, const char *json, size_t json_len)
+{ (void)id; (void)json; (void)json_len; return false; }
+db_sqlite_telemetry_candidate_row_t *db_sqlite_query_telemetry_candidates(size_t *out_n)
+{ if (out_n) *out_n = 0; return NULL; }
+bool db_sqlite_apply_telemetry_recover(int64_t id, const char *telemetry_json,
+                                       const char *json, size_t json_len)
+{ (void)id; (void)telemetry_json; (void)json; (void)json_len; return false; }
 
 #endif /* HAVE_SQLITE3 */

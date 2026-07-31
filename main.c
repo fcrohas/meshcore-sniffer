@@ -19,6 +19,10 @@
 #include "db_sqlite.h"
 #include "c2_dealer.h"
 #include "dedup.h"
+#include "crc_recover.h"
+#include "meshcore_lpp_recover.h"
+#include "meshcore_region_recover.h"
+#include "meshcore_redecrypt.h"
 #include "feed.h"
 #include "focused.h"
 #include "geofence.h"
@@ -3357,6 +3361,36 @@ static int run_aes_selftest(void)
     return pass ? 0 : 1;
 }
 
+/* Builds a MeshCore channelset from CLI config: the official app's
+ * default "Public" channel plus a handful of well-known public
+ * hashtag channels (unless --meshcore-no-default-channel), then every
+ * --meshcore-channel=NAME:SECRET the operator passed. Shared by
+ * run_live() (the live decoder) and the --crc-recover one-shot
+ * maintenance mode in main() below -- both need the same channel set
+ * to attempt GRP_TXT/GRP_DATA decrypt against. Caller owns/destroys
+ * the returned channelset. */
+static meshcore_channelset_t *build_meshcore_channels(void)
+{
+    meshcore_channelset_t *cs = meshcore_channelset_create();
+    if (!opt_meshcore_no_default_channel) {
+        if (meshcore_channelset_add_default_public(cs, NULL, NULL) < 0)
+            fprintf(stderr, "meshcore: could not preload default 'Public' channel\n");
+        static const char *default_hashtags[] = {
+            "test", "bot", "meteo", "fr", "fr-30", "fr-34", "fr-occ",
+        };
+        for (size_t i = 0; i < sizeof(default_hashtags) / sizeof(default_hashtags[0]); ++i) {
+            if (meshcore_channelset_add_hashtag(cs, default_hashtags[i], NULL, NULL) < 0)
+                fprintf(stderr, "meshcore: could not preload hashtag channel '#%s'\n",
+                        default_hashtags[i]);
+        }
+    }
+    for (int i = 0; i < opt_meshcore_channel_count; ++i) {
+        if (meshcore_channelset_add_spec(cs, opt_meshcore_channel[i], NULL, NULL) < 0)
+            fprintf(stderr, "meshcore-channel: could not parse '%s'\n", opt_meshcore_channel[i]);
+    }
+    return cs;
+}
+
 /* ---- Live run ---- */
 
 static int run_live(void)
@@ -3492,31 +3526,10 @@ static int run_live(void)
 
     if (verbose) keyset_print(g_keys);
 
-    /* MeshCore channels (--meshcore-channel=NAME:SECRET, repeatable).
-     * The official app's default "Public" channel is preloaded first
-     * (unless --meshcore-no-default-channel) so a bare --protocol=meshcore
-     * can already decode messages on the universal default channel, along
-     * with a handful of well-known public hashtag channels -- their
-     * secrets are derived from the name alone (see
-     * meshcore_channelset_add_hashtag()), just like the official app's
-     * "Add Channel" flow, so no key material is needed here either. */
-    g_meshcore_channels = meshcore_channelset_create();
-    if (!opt_meshcore_no_default_channel) {
-        if (meshcore_channelset_add_default_public(g_meshcore_channels, NULL, NULL) < 0)
-            fprintf(stderr, "meshcore: could not preload default 'Public' channel\n");
-        static const char *default_hashtags[] = {
-            "test", "bot", "meteo", "fr", "fr-30", "fr-34", "fr-occ",
-        };
-        for (size_t i = 0; i < sizeof(default_hashtags) / sizeof(default_hashtags[0]); ++i) {
-            if (meshcore_channelset_add_hashtag(g_meshcore_channels, default_hashtags[i], NULL, NULL) < 0)
-                fprintf(stderr, "meshcore: could not preload hashtag channel '#%s'\n",
-                        default_hashtags[i]);
-        }
-    }
-    for (int i = 0; i < opt_meshcore_channel_count; ++i) {
-        if (meshcore_channelset_add_spec(g_meshcore_channels, opt_meshcore_channel[i], NULL, NULL) < 0)
-            fprintf(stderr, "meshcore-channel: could not parse '%s'\n", opt_meshcore_channel[i]);
-    }
+    /* MeshCore channels (--meshcore-channel=NAME:SECRET, repeatable,
+     * plus the preloaded default "Public" + hashtag channels unless
+     * --meshcore-no-default-channel) -- see build_meshcore_channels(). */
+    g_meshcore_channels = build_meshcore_channels();
 
     /* If requested, preload FFTW wisdom so plan creation reuses prior
      * timing data instead of running FFTW_MEASURE from scratch. Has to
@@ -4183,6 +4196,91 @@ int main(int argc, char **argv)
 
     if (opt_print_schema) {
         schema_print();
+        return 0;
+    }
+
+    if (opt_crc_recover) {
+        if (!opt_sqlite_db) {
+            fprintf(stderr, "--crc-recover requires --sqlite-db=PATH\n");
+            return 1;
+        }
+        if (!db_sqlite_init(opt_sqlite_db)) {
+            fprintf(stderr, "--crc-recover: could not open %s\n", opt_sqlite_db);
+            return 1;
+        }
+        meshcore_channelset_t *cs = build_meshcore_channels();
+        crc_recover_stats_t stats;
+        int fixed = meshcore_crc_recover_scan(cs, &stats);
+        fprintf(stderr,
+                "crc-recover: %zu crc_ok=0 MeshCore row(s) examined\n"
+                "  fixed, single-bit:                    %zu\n"
+                "  fixed, two-bit (authenticated):        %zu\n"
+                "  CRC match found but NOT authenticated (left as crc_ok=0): %zu\n"
+                "  re-decode failed after CRC matched:    %zu\n"
+                "  total fixed and persisted:             %d\n",
+                stats.total_candidates, stats.fixed_1bit, stats.fixed_2bit,
+                stats.untrusted, stats.decode_failed, fixed);
+        meshcore_channelset_destroy(cs);
+        db_sqlite_shutdown();
+        return 0;
+    }
+
+    if (opt_region_recover) {
+        if (!opt_sqlite_db) {
+            fprintf(stderr, "--region-recover requires --sqlite-db=PATH\n");
+            return 1;
+        }
+        if (!db_sqlite_init(opt_sqlite_db)) {
+            fprintf(stderr, "--region-recover: could not open %s\n", opt_sqlite_db);
+            return 1;
+        }
+        meshcore_channelset_t *cs = build_meshcore_channels();
+        region_recover_stats_t stats;
+        int resolved = meshcore_region_recover_scan(cs, &stats);
+        fprintf(stderr,
+                "region-recover: %zu transport-coded MeshCore row(s) examined\n"
+                "  newly resolved:                        %zu\n"
+                "  re-decode failed:                      %zu\n"
+                "  total updated and persisted:           %d\n",
+                stats.total_candidates, stats.resolved, stats.decode_failed, resolved);
+        meshcore_channelset_destroy(cs);
+        db_sqlite_shutdown();
+        return 0;
+    }
+
+    if (opt_telemetry_recover) {
+        if (!opt_sqlite_db) {
+            fprintf(stderr, "--telemetry-recover requires --sqlite-db=PATH\n");
+            return 1;
+        }
+        if (!db_sqlite_init(opt_sqlite_db)) {
+            fprintf(stderr, "--telemetry-recover: could not open %s\n", opt_sqlite_db);
+            return 1;
+        }
+        meshcore_channelset_t *cs = build_meshcore_channels();
+        /* Unlike --region-recover (which needs no key material), this
+         * pass genuinely re-decrypts each candidate row -- load every
+         * channel name this DB has ever confirmed (same restoration
+         * run_live() does on every startup) on top of the CLI-
+         * configured/default set, so a row whose channel was only
+         * ever discovered by the background dictionary attack (never
+         * passed via --meshcore-channel) still has a chance to
+         * re-decrypt here. */
+        char names[MC_CHANNEL_MAX_ENTRIES][40];
+        size_t nn = db_sqlite_query_known_channel_names(names, MC_CHANNEL_MAX_ENTRIES);
+        for (size_t i = 0; i < nn; ++i)
+            meshcore_channelset_add_hashtag(cs, names[i], NULL, NULL);
+        telemetry_recover_stats_t stats;
+        int resolved = meshcore_lpp_recover_scan(cs, &stats);
+        fprintf(stderr,
+                "telemetry-recover: restored %zu known channel name(s) from history\n"
+                "  already-decrypted GRP_DATA row(s) examined: %zu\n"
+                "  newly resolved (now CayenneLPP telemetry):  %zu\n"
+                "  re-decode failed (channel not loaded, etc): %zu\n"
+                "  total updated and persisted:                %d\n",
+                nn, stats.total_candidates, stats.resolved, stats.decode_failed, resolved);
+        meshcore_channelset_destroy(cs);
+        db_sqlite_shutdown();
         return 0;
     }
 

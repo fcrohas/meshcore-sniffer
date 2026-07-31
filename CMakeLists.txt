@@ -140,6 +140,7 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/meshcore.c
     ${PROJECT_SOURCE_DIR}/meshcore_packet.c
     ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_lpp.c
     ${PROJECT_SOURCE_DIR}/file_src.c
     ${PROJECT_SOURCE_DIR}/vita49.c
     ${PROJECT_SOURCE_DIR}/channelizer.c
@@ -167,7 +168,11 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/pcap_out.c
     ${PROJECT_SOURCE_DIR}/psk_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c
+    ${PROJECT_SOURCE_DIR}/meshcore_region_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_redecrypt.c
+    ${PROJECT_SOURCE_DIR}/crc_recover.c
+    ${PROJECT_SOURCE_DIR}/meshcore_region_recover.c
+    ${PROJECT_SOURCE_DIR}/meshcore_lpp_recover.c
     ${PROJECT_SOURCE_DIR}/schema.c
     ${PROJECT_SOURCE_DIR}/scanner.c
     ${PROJECT_SOURCE_DIR}/web.c
@@ -336,6 +341,8 @@ add_executable(meshcore-recover
     ${PROJECT_SOURCE_DIR}/meshcore.c
     ${PROJECT_SOURCE_DIR}/meshcore_packet.c
     ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_lpp.c
+    ${PROJECT_SOURCE_DIR}/meshcore_region_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict_stub.c)
 target_link_libraries(meshcore-recover PRIVATE
     Threads::Threads
@@ -429,6 +436,8 @@ add_executable(test_meshcore
     ${PROJECT_SOURCE_DIR}/meshcore.c
     ${PROJECT_SOURCE_DIR}/meshcore_packet.c
     ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_lpp.c
+    ${PROJECT_SOURCE_DIR}/meshcore_region_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict_stub.c)
 target_link_libraries(test_meshcore PRIVATE
     Threads::Threads
@@ -445,6 +454,8 @@ add_executable(test_meshcore_hashtag_dict
     ${PROJECT_SOURCE_DIR}/meshcore.c
     ${PROJECT_SOURCE_DIR}/meshcore_packet.c
     ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_lpp.c
+    ${PROJECT_SOURCE_DIR}/meshcore_region_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_redecrypt_stub.c)
 target_link_libraries(test_meshcore_hashtag_dict PRIVATE
@@ -467,6 +478,8 @@ add_executable(test_feed_meshcore
     ${PROJECT_SOURCE_DIR}/meshcore.c
     ${PROJECT_SOURCE_DIR}/meshcore_packet.c
     ${PROJECT_SOURCE_DIR}/meshcore_decoders.c
+    ${PROJECT_SOURCE_DIR}/meshcore_lpp.c
+    ${PROJECT_SOURCE_DIR}/meshcore_region_dict.c
     ${PROJECT_SOURCE_DIR}/meshcore_hashtag_dict_stub.c)
 target_link_libraries(test_feed_meshcore PRIVATE
     Threads::Threads

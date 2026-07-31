@@ -232,4 +232,129 @@ db_sqlite_undecrypted_row_t *db_sqlite_query_undecrypted_channel_rows(uint8_t ch
 bool db_sqlite_apply_redecrypt(int64_t id, const char *channel_name,
                                const char *text, const char *json, size_t json_len);
 
+/* Retroactive CRC recovery support (see crc_recover.c): the CRC
+ * bruteforce fallback tiers (lora_crc_bruteforce_correct[_2bit],
+ * lora.h) only ever run live, at capture time -- a row already stored
+ * with crc_ok=0 was never retried against a *newer* build's stronger
+ * recovery (e.g. the 2-bit fallback added after it was captured), or
+ * against a MeshCore channel key that only became known afterward.
+ * These two functions are the generic (protocol-decode-free) DB half
+ * of retrying it: db_sqlite.c has no CRC/decode knowledge itself, the
+ * actual bit-flip search + re-decode + trust gate happens in
+ * crc_recover.c, which calls these to fetch candidates and persist
+ * hits. */
+
+typedef struct {
+    int64_t id;
+    double  ts;
+    int     sf, cr, bw_hz;
+    double  rssi_db, snr_db;
+    char    raw_hex[513]; /* matches mesh_event_t.raw_hex (mesh_packet.h) */
+} db_sqlite_crc_fail_row_t;
+
+/* Every still-failing (crc_ok=0) MeshCore row, as a malloc'd array of
+ * *out_n entries (caller frees). Rows with no raw_hex (shouldn't
+ * happen, but guarded) are skipped. NULL and *out_n=0 if
+ * db_sqlite_init() wasn't called/failed, or nothing matches.
+ * Meshtastic rows are excluded: crc_recover.c's 2-bit tier is only
+ * ever trustworthy on MeshCore GRP_TXT/GRP_DATA/ADVERT (independent
+ * authentication -- see mesh_event_crc2bit_trusted()), and there is
+ * no equivalent check for the Meshtastic protocol path. */
+db_sqlite_crc_fail_row_t *db_sqlite_query_meshcore_crc_fail_rows(size_t *out_n);
+
+/* Persist a successful retroactive CRC recovery of row `id`: flips
+ * crc_ok=1, crc_corrected=1, sets crc_corrected_bits (1 or 2),
+ * decrypted, channel_name/text if decode produced them, and
+ * overwrites the stored json column with newly re-serialized JSON
+ * (caller re-serializes via feed_serialize_event_meshcore() with
+ * ts_override set to the row's original ts, same convention as
+ * db_sqlite_apply_redecrypt above). Returns false if
+ * db_sqlite_init() wasn't called/failed, or the UPDATE affected no
+ * row. */
+bool db_sqlite_apply_crc_recover(int64_t id, int crc_corrected_bits, bool decrypted,
+                                  const char *channel_name, const char *text,
+                                  const char *json, size_t json_len);
+
+/* Retroactive region-scope resolution support (see
+ * meshcore_region_recover.c): meshcore_region_dict.c's wordlist only
+ * grows over time (e.g. the fr-<dept>/fr-<region> set added after
+ * some transport-coded rows were already captured), so a row stored
+ * before a name was in the dictionary never got a region_name --
+ * region resolution doesn't depend on channel keys or CRC state like
+ * the two retroactive passes above, just the wordlist, so this is the
+ * simplest of the three: re-parse+re-decode (which already calls
+ * meshcore_region_resolve_full() internally) and, if resolution succeeds
+ * where it previously didn't, overwrite the stored json. db_sqlite.c
+ * has no MeshCore decode knowledge itself; the actual re-decode
+ * happens in meshcore_region_recover.c, which calls these to fetch
+ * candidates and persist hits. */
+
+typedef struct {
+    int64_t id;
+    double  ts;
+    int     sf, cr, bw_hz;
+    double  rssi_db, snr_db;
+    char    raw_hex[513]; /* matches mesh_event_t.raw_hex (mesh_packet.h) */
+} db_sqlite_region_scope_row_t;
+
+/* Every MeshCore row whose route_type carries transport codes
+ * (TRANSPORT_FLOOD=0 or TRANSPORT_DIRECT=3 -- see mc_route_type_t,
+ * meshcore.h), as a malloc'd array of *out_n entries (caller frees).
+ * Not filtered by whether region_name is already resolved in the
+ * stored JSON (that field isn't broken out into its own column, and
+ * re-resolving an already-resolved row is cheap and idempotent).
+ * Rows with no raw_hex (shouldn't happen, but guarded) are skipped.
+ * NULL and *out_n=0 if db_sqlite_init() wasn't called/failed, or
+ * nothing matches. */
+db_sqlite_region_scope_row_t *db_sqlite_query_region_scope_rows(size_t *out_n);
+
+/* Persist a freshly re-serialized JSON for row `id` after a
+ * retroactive region-resolve pass. Unlike db_sqlite_apply_redecrypt/
+ * _crc_recover above, no other column needs updating -- route_type,
+ * decrypted, crc_ok etc. are all unchanged; only the json blob's
+ * region_name field is new information. Returns false if
+ * db_sqlite_init() wasn't called/failed, or the UPDATE affected no
+ * row. */
+bool db_sqlite_apply_region_recover(int64_t id, const char *json, size_t json_len);
+
+/* Retroactive telemetry (CayenneLPP-over-GRP_DATA) resolution support
+ * (see meshcore_lpp_recover.c): meshcore_lpp_decode() (meshcore_lpp.c)
+ * was added after this DB may already hold GRP_DATA rows that were
+ * decrypted (decrypted=1) but stored with telemetry_json unset --
+ * they went through the old hex-dump-only code path. Unlike region-
+ * scope recovery, this genuinely needs re-decryption (the LPP blob
+ * only exists after AES-128-ECB+HMAC verify/decrypt), so the caller
+ * must supply a channelset with the right keys -- rows whose channel
+ * isn't loaded simply won't re-decrypt and are skipped, same
+ * limitation crc_recover.c/meshcore_region_recover.c already have.
+ * db_sqlite.c has no MeshCore decode/LPP knowledge itself; the actual
+ * re-decode + LPP decode happens in meshcore_lpp_recover.c, which
+ * calls these to fetch candidates and persist hits. */
+
+typedef struct {
+    int64_t id;
+    double  ts;
+    int     sf, cr, bw_hz;
+    double  rssi_db, snr_db;
+    char    raw_hex[513]; /* matches mesh_event_t.raw_hex (mesh_packet.h) */
+} db_sqlite_telemetry_candidate_row_t;
+
+/* Every already-decrypted (decrypted=1) MeshCore GRP_DATA row whose
+ * telemetry_json is still unset, as a malloc'd array of *out_n
+ * entries (caller frees). Rows with no raw_hex (shouldn't happen,
+ * but guarded) are skipped. NULL and *out_n=0 if db_sqlite_init()
+ * wasn't called/failed, or nothing matches. */
+db_sqlite_telemetry_candidate_row_t *db_sqlite_query_telemetry_candidates(size_t *out_n);
+
+/* Persist a successful retroactive LPP decode of row `id`: sets
+ * telemetry_json and overwrites the stored json column with newly
+ * re-serialized JSON (caller re-serializes via
+ * feed_serialize_event_meshcore() with ts_override set to the row's
+ * original ts, same convention as db_sqlite_apply_redecrypt/
+ * _crc_recover/_region_recover above). Returns false if
+ * db_sqlite_init() wasn't called/failed, or the UPDATE affected no
+ * row. */
+bool db_sqlite_apply_telemetry_recover(int64_t id, const char *telemetry_json,
+                                       const char *json, size_t json_len);
+
 #endif /* DB_SQLITE_H */
