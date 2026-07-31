@@ -28,7 +28,18 @@ Single-binary wideband Meshtastic LoRa receiver, with an additive MeshCore proto
             |        v   IDLE -> PREAMBLE_OK -> HEADER -> PAYLOAD -> DELIVER
             |    [Gray, diagonal deinterleave, Hamming(8,4), dewhiten, CRC16,
             |     single-bit brute-force recovery on CRC-fail (lora_crc_bruteforce_correct,
-            |     --no-crc-bruteforce to disable; recovered frames flagged crc_corrected)]
+            |     --no-crc-bruteforce to disable; recovered frames flagged crc_corrected),
+            |     optional two-bit fallback (lora_crc_bruteforce_correct_2bit,
+            |     --crc-bruteforce-2bit to enable, off by default) -- a bare 2-bit
+            |     CRC16 match collides with wrong content too often to trust alone
+            |     (measured ~44% "fixed" on real CRC-fail frames, but a control
+            |     search against a random target also hit ~41%), so a 2-bit fix
+            |     is only published (crc_corrected_bits=2) when main.c's
+            |     on_mesh_event() confirms independent authentication via
+            |     mesh_event_crc2bit_trusted() -- MeshCore GRP_TXT/GRP_DATA's
+            |     per-channel HMAC or ADVERT's Ed25519 signature. Every other
+            |     payload type and the Meshtastic path have no equivalent check
+            |     and never trust a 2-bit fix]
             |        |
             |        v   raw bytes (16-byte radio header + ciphertext)
             |    on_lora_frame() -> dedup ring (PFB bin-leakage filter)

@@ -72,6 +72,7 @@ static int g_history_count = 0;  /* total entries currently stored, capped */
 static const char DASHBOARD_HTML[] =
 "<!doctype html>\n"
 "<html><head><meta charset=\"utf-8\">\n"
+"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=5\">\n"
 "<title>meshcore-sniffer</title>\n"
 "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\">\n"
 "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\"></script>\n"
@@ -129,7 +130,7 @@ static const char DASHBOARD_HTML[] =
 "#analyzertbl td.mctype{color:#38bdf8;white-space:nowrap}\n"
 "#analyzertbl td.ts{white-space:nowrap;color:#64748b}\n"
 "#analyzertbl td.aexp{width:16px;cursor:pointer;color:#64748b;text-align:center}\n"
-"#analyzertbl td.proto,#analyzertbl td.node,#analyzertbl td.chan,#analyzertbl td.snr{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}\n"
+"#analyzertbl td.proto,#analyzertbl td.node,#analyzertbl td.chan,#analyzertbl td.snr,#analyzertbl td.scope,#analyzertbl td.hops{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}\n"
 "tr.analyzer-row{cursor:pointer}\n"
 "tr.analyzer-row:hover{background:#1e293b}\n"
 "html.light tr.analyzer-row:hover{background:#e2e8f0}\n"
@@ -215,6 +216,11 @@ static const char DASHBOARD_HTML[] =
 "#chantab-msgs .chat-meta{font-size:11px;color:#64748b;margin-bottom:3px}\n"
 "#chantab-msgs .chat-meta b{color:#38bdf8;font-weight:600}\n"
 "#chantab-msgs .chat-msg.side-b .chat-meta b{color:#4ade80}\n"
+".region-badge{display:inline-block;margin:0 4px 4px 0;padding:0 6px;border-radius:8px;font-size:10px;font-weight:600;text-transform:none;letter-spacing:0;vertical-align:middle;background:#312e81;color:#c7d2fe}\n"
+"#chantab-msgs .region-badge{margin-left:6px}\n"
+".region-badge.unresolved{background:#292524;color:#a8a29e;font-weight:500;font-family:'SF Mono',Consolas,monospace}\n"
+"html.light .region-badge{background:#e0e7ff;color:#3730a3}\n"
+"html.light .region-badge.unresolved{background:#f1f5f9;color:#64748b}\n"
 "#chantab-msgs .chat-bubble{background:#1e293b;border-radius:12px;padding:8px 12px;font-size:13px;line-height:1.4;word-wrap:break-word;white-space:pre-wrap;display:inline-block}\n"
 "#chantab-msgs .chat-msg.side-b .chat-bubble{background:#1e3a5f}\n"
 "#chantab-msgs .chat-foot{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:11px;color:#64748b}\n"
@@ -476,6 +482,7 @@ static const char DASHBOARD_HTML[] =
 "    <div id=\"chantab-msgs-empty\" class=\"empty-hint\">Select a channel on the left to see its messages.</div>\n"
 "    <div id=\"chantab-msgs-loadolder-wrap\" style=\"display:none\"><button id=\"chantab-msgs-loadolder\" class=\"btn-mini\">Load older messages</button> <span id=\"chantab-msgs-loadolder-status\" class=\"muted\"></span></div>\n"
 "  </div>\n"
+"  </div>\n"
 "</div>\n"
 "<div id=\"topology\" class=\"tab\">\n"
 "  <div id=\"topo-empty\" class=\"empty-hint\">Waiting for the first frame... nodes appear as soon as the sniffer hears them, and link up via NEIGHBORINFO and relay-hop hints.</div>\n"
@@ -496,6 +503,10 @@ static const char DASHBOARD_HTML[] =
 "  <div class=\"row\">\n"
 "    <label><input type=\"checkbox\" id=\"showUntrusted\"> Show untrusted frames (CRC-fail or no-decrypt) in map / nodes / channels</label>\n"
 "    <div class=\"hint\">Off by default. Frames without verified bytes (e.g. cross-slot phantoms of a real TX, or noise patterns that passed the 5-bit header checksum by chance) decode to corrupted from/to/packet_id fields. Surfacing them invents nodes that don't exist. Turn this on for diagnostic inspection of what the demod produced before trust filtering.</div>\n"
+"  </div>\n"
+"  <div class=\"row\">\n"
+"    <label><input type=\"checkbox\" id=\"showNodeIdLabels\" checked> Show node ID (first 4 hex chars) next to markers on the map</label>\n"
+"    <div class=\"hint\">On by default. Shows a small always-visible label with the first 4 hex digits of each node's id (e.g. \"532b\") beside its marker, alongside its name.</div>\n"
 "  </div>\n"
 "</div>\n"
 "<div id=\"stats\" class=\"tab\">\n"
@@ -566,11 +577,12 @@ static const char DASHBOARD_HTML[] =
 "    <section><h3>Recent messages</h3><div id=\"drawer-msgs\"></div></section>\n"
 "    <section><h3>Recent positions</h3><div id=\"drawer-pos\"></div></section>\n"
 "    <section><h3>Channels seen on</h3><div id=\"drawer-channels\"></div></section>\n"
+"    <section><h3>Region scoping <span class=muted>(MeshCore v1.10+)</span></h3><div id=\"drawer-region\"></div></section>\n"
 "  </div>\n"
 "</aside>\n"
 "<script>\n"
 "function showTab(name){\n"
-"  for(const t of ['live','channelstab','topology','config','stats','analyzer']){\n"
+"  for(const t of ['live','channelstab','topology','config','stats','analyzer','telemetry']){\n"
 "    document.getElementById(t).classList.toggle('active',t===name);\n"
 "    document.getElementById('tab-'+t).classList.toggle('active',t===name);\n"
 "  }\n"
@@ -796,7 +808,7 @@ static const char DASHBOARD_HTML[] =
 "      name = `${tail} <span class=muted>(${state})</span>`;\n"
 "    }\n"
 "    tr.innerHTML = `<td>${id}</td><td>${name}</td><td>${snr}</td><td>${n.frames||0}</td><td>${fmtTime(n.ts)}</td>`;\n"
-"    tr.onclick = ()=>openDrawer(id);\n"
+"    tr.onclick = ()=>{ openDrawer(id); blinkRepeater(id); if (markers[id] && markers[id].getLatLng) map.panTo(markers[id].getLatLng()); };\n"
 "    frag.appendChild(tr);\n"
 "  }\n"
 "  tbody.replaceChildren(frag);\n"
@@ -905,12 +917,14 @@ static const char DASHBOARD_HTML[] =
 "const dLast = document.getElementById('d-last');\n"
 "const dMsgs = document.getElementById('drawer-msgs'), dPos = document.getElementById('drawer-pos');\n"
 "const dChan = document.getElementById('drawer-channels');\n"
+"const dRegion = document.getElementById('drawer-region');\n"
 "const dSpark = document.getElementById('drawer-spark');\n"
 "function openDrawer(id){\n"
 "  drawerNodeId = id;\n"
 "  drawerEl.classList.add('open');\n"
 "  drawerEl.setAttribute('aria-hidden','false');\n"
 "  refreshDrawer();\n"
+"  loadNodeHistoryFromApi(id);\n"
 "  // Repaint table to show the .selected row highlight.\n"
 "  refreshNodes();\n"
 "}\n"
@@ -1116,7 +1130,9 @@ static const char DASHBOARD_HTML[] =
 "function analyzerCrcBadge(p){\n"
 "  if (p.payload_crc_ok === undefined) return '<span class=muted>--</span>';\n"
 "  if (!p.payload_crc_ok) return '<span class=\"crc-badge crc-fail\">fail</span>';\n"
-"  return p.crc_corrected ? '<span class=\"crc-badge crc-corrected\" title=\"Recovered via single-bit brute-force\">corrected</span>' : '<span class=\"crc-badge crc-ok\">ok</span>';\n"
+"  if (!p.crc_corrected) return '<span class=\"crc-badge crc-ok\">ok</span>';\n"
+"  var bits = p.crc_corrected_bits === 2 ? '2-bit' : 'single-bit';\n"
+"  return '<span class=\"crc-badge crc-corrected\" title=\"Recovered via '+bits+' brute-force\">corrected</span>';\n"
 "}\n"
 /* analyzerCrcBucket -- 'ok'/'corrected'/'fail'/'' classification used
  * by both the CRC badge above and the CRC filter dropdown, so the two
@@ -1136,6 +1152,26 @@ static const char DASHBOARD_HTML[] =
 "function analyzerChanLabel(p){\n"
 "  if (p.channel_name) return p.channel_name;\n"
 "  if (p.channel_hash !== undefined) return '0x'+p.channel_hash.toString(16);\n"
+"  return '';\n"
+"}\n"
+/* analyzerScopeLabel/analyzerHopsLabel -- Analyzer-tab column
+ * counterparts to the region-scope chat badge and channel-chat "N
+ * hops" button (see renderChannelMessages()); plain text here to
+ * match analyzerChanLabel/analyzerNodeLabel's convention (row build
+ * wraps every cell in escHtml()) rather than the chat's HTML badge
+ * markup -- this table is a dense debug view, not a chat log. */
+"function analyzerScopeLabel(p){\n"
+"  if (p.region_scope !== true) return '';\n"
+"  if (p.region_name) return p.region_name;\n"
+"  return '0x'+((p.region_code1||0)>>>0).toString(16).padStart(4,'0');\n"
+"}\n"
+"function analyzerHopsLabel(p){\n"
+"  if (p.protocol === 'meshcore') {\n"
+"    if (p.route_path_hash_count) return String(p.route_path_hash_count);\n"
+"    if (p.trace_route_hashes_hex) return String(p.trace_route_hashes_hex.length/2);\n"
+"    return '';\n"
+"  }\n"
+"  if (typeof p.hop_start === 'number' && typeof p.hop_limit === 'number') return String(p.hop_start - p.hop_limit);\n"
 "  return '';\n"
 "}\n"
 /* analyzerRowMatches -- true if a frame passes the current search box
@@ -1188,8 +1224,9 @@ static const char DASHBOARD_HTML[] =
 "  tr.innerHTML = `<td class=aexp>\\u25b8</td><td class=ts>${fmtTime(p.ts)}</td>`+\n"
 "    `<td class=proto>${escHtml(proto)}</td><td class=mctype>${escHtml(type)}</td>`+\n"
 "    `<td class=node>${escHtml(analyzerNodeLabel(p))}</td><td class=chan>${escHtml(analyzerChanLabel(p))}</td>`+\n"
+"    `<td class=scope>${escHtml(analyzerScopeLabel(p))}</td><td class=hops>${escHtml(analyzerHopsLabel(p))}</td>`+\n"
 "    `<td>${analyzerCrcBadge(p)}</td><td class=snr>${p.snr_db!==undefined?p.snr_db.toFixed(1)+' dB':''}</td>`+\n"
-"    `<td class=hex>${escHtml(p.raw_hex||'')}</td>`;\n"
+"    `<td class=hex><button class=btn-mini onclick=\"toggleAnalyzerHex(this, event)\">Show</button><span style=\"display:none\">${escHtml(p.raw_hex||'')}</span></td>`;\n"
 "  const visible = analyzerRowMatches(p);\n"
 "  tr.style.display = visible ? '' : 'none';\n"
 "  if (visible) analyzerVisible++;\n"
@@ -1207,6 +1244,19 @@ static const char DASHBOARD_HTML[] =
 "  }\n"
 "  analyzerUpdateCount();\n"
 "}\n"
+/* toggleAnalyzerHex -- Frame(hex) column stays collapsed to a "Show"
+ * button by default (hex strings are long and were otherwise pushing
+ * the rest of this already-dense table's columns into ellipsis at
+ * every width); reveals/re-collapses the actual hex text in place.
+ * stopPropagation() so clicking it doesn't also toggle the row's own
+ * detail expansion (tr.onclick, see toggleAnalyzerDetail below). */
+"function toggleAnalyzerHex(btn, event){\n"
+"  event.stopPropagation();\n"
+"  const span = btn.nextElementSibling;\n"
+"  const showing = span.style.display !== 'none';\n"
+"  span.style.display = showing ? 'none' : 'inline';\n"
+"  btn.textContent = showing ? 'Show' : 'Hide';\n"
+"}\n"
 "function toggleAnalyzerDetail(tr, id){\n"
 "  const next = tr.nextSibling;\n"
 "  if (next && next.classList && next.classList.contains('analyzer-detail')) {\n"
@@ -1222,7 +1272,7 @@ static const char DASHBOARD_HTML[] =
 "  const detailTr = document.createElement('tr');\n"
 "  detailTr.className = 'analyzer-detail';\n"
 "  const td = document.createElement('td');\n"
-"  td.colSpan = 9;\n"
+"  td.colSpan = 11;\n"
 "  td.innerHTML = analyzerDetailHtml(p);\n"
 "  detailTr.appendChild(td);\n"
 "  tr.parentNode.insertBefore(detailTr, tr.nextSibling);\n"
@@ -1262,8 +1312,8 @@ static const char DASHBOARD_HTML[] =
 "    ['port_name','portnum','from','to','packet_id','hop_start','hop_limit'].forEach(k=>shown.add(k));\n"
 "  }\n"
 "  add('Decrypted', p.decrypted === undefined ? undefined : (p.decrypted ? 'yes' : 'no'));\n"
-"  add('CRC', p.payload_crc_ok === undefined ? undefined : (p.payload_crc_ok ? (p.crc_corrected ? 'ok (bit-flip corrected)' : 'ok') : 'FAIL'));\n"
-"  ['decrypted','has_crc','payload_crc_ok','crc_corrected'].forEach(k=>shown.add(k));\n"
+"  add('CRC', p.payload_crc_ok === undefined ? undefined : (p.payload_crc_ok ? (p.crc_corrected ? ('ok (' + (p.crc_corrected_bits === 2 ? '2-bit' : 'bit-flip') + ' corrected)') : 'ok') : 'FAIL'));\n"
+"  ['decrypted','has_crc','payload_crc_ok','crc_corrected','crc_corrected_bits'].forEach(k=>shown.add(k));\n"
 "  if (p.rssi_db !== undefined || p.snr_db !== undefined) {\n"
 "    add('RSSI / SNR', `${p.rssi_db!==undefined?p.rssi_db.toFixed(1)+' dBm':'--'} / ${p.snr_db!==undefined?p.snr_db.toFixed(1)+' dB':'--'}`);\n"
 "  }\n"
@@ -1561,6 +1611,29 @@ static const char DASHBOARD_HTML[] =
  * Leaflet classes with no in-place conversion, so a kind change
  * (e.g. adv_type learned only after the marker already exists)
  * removes and recreates rather than mutating. */
+/* idLabel -- first 4 hex digits of the node id (after the leading
+ * '!'), e.g. '!532b1234...' -> '532b'. Shown next to a marker on the
+ * map when #showNodeIdLabels is checked -- useful shorthand alongside
+ * a node's long_name, since that's how the id is commonly abbreviated
+ * when talking about a specific node on the mesh. */
+"function idLabel(id) {\n"
+"  const m = /^!?([0-9a-fA-F]{4})/.exec(id);\n"
+"  return m ? m[1].toLowerCase() : id;\n"
+"}\n"
+/* updateNodeIdLabel -- bind/unbind a permanent Leaflet tooltip showing
+ * idLabel(id) next to the marker, following the #showNodeIdLabels
+ * checkbox. Leaflet's bindTooltip/unbindTooltip work on both
+ * CircleMarker and Marker (room kind), so this needs no per-kind
+ * branch. */
+"function updateNodeIdLabel(marker, id) {\n"
+"  const cb = document.getElementById('showNodeIdLabels');\n"
+"  if (cb && cb.checked) {\n"
+"    if (marker.getTooltip && marker.getTooltip()) marker.setTooltipContent(idLabel(id));\n"
+"    else marker.bindTooltip(idLabel(id), {permanent:true, direction:'right', offset:[8,0], className:'node-id-label'});\n"
+"  } else if (marker.unbindTooltip) {\n"
+"    marker.unbindTooltip();\n"
+"  }\n"
+"}\n"
 "function placeMarker(id, ll, n) {\n"
 "  const kind = nodeKind(n);\n"
 "  const existing = markers[id];\n"
@@ -1570,10 +1643,19 @@ static const char DASHBOARD_HTML[] =
 "  }\n"
 "  const marker = kind === 'room' ? L.marker(ll, {icon: ROOM_ICON}) : L.circleMarker(ll, NODE_STYLES[kind]);\n"
 "  marker._kind = kind;\n"
-"  marker.addTo(map).bindPopup(`<b>${id}</b><br>${(n && n.name) || ''}`);\n"
+/* Clicking a marker opens the same drawer a node-list row click does
+ * (openDrawer(id), see renderNodes()) instead of Leaflet's default
+ * popup -- the drawer already shows everything a popup would (name,
+ * id) plus frames/SNR/positions/channels/region scoping, so a
+ * separate popup would just be a redundant, less useful click target. */
+"  marker.addTo(map).on('click', () => openDrawer(id));\n"
+"  updateNodeIdLabel(marker, id);\n"
 "  markers[id] = marker;\n"
 "  return marker;\n"
 "}\n"
+"document.getElementById('showNodeIdLabels').addEventListener('change', () => {\n"
+"  for (const id of Object.keys(markers)) updateNodeIdLabel(markers[id], id);\n"
+"});\n"
 /* blinkRepeater -- 10s green blink on a repeater/sensor marker relaying
  * a live frame (see traceLivePath() below). No-op for markers with no
  * .setStyle() (rooms use L.Marker+divIcon, which has none). Restores
@@ -1750,14 +1832,15 @@ static const char DASHBOARD_HTML[] =
 "          type:p.port_name||p.mc_type||'', summary:summary, rawText:p.text||null, path:pathSummary(p),\n"
 "          pathHex:p.route_path_hex||p.trace_route_hashes_hex||null,\n"
 "          pathHopCount:p.route_path_hash_count||(p.trace_route_hashes_hex?p.trace_route_hashes_hex.length/2:0),\n"
-"          pathHashSize:p.route_path_hash_size||1};\n"
+"          pathHashSize:p.route_path_hash_size||1,\n"
+"          regionScope:p.region_scope===true, regionCode1:p.region_code1, regionName:p.region_name||null};\n"
 "}\n"
 "function noteChannelMessage(h, p, summary){\n"
 "  const c = channels[h]; if (!c) return;\n"
 "  if (!c._msgs) c._msgs = [];\n"
 "  c._msgs.unshift(buildMsgRow(p, summary));\n"
 "  if (c._msgs.length > CHAN_HIST_MSGS) c._msgs.length = CHAN_HIST_MSGS;\n"
-"  if (selectedChannelHash === h) renderChannelMessages();\n"
+"  if (selectedChannelHash === String(h)) renderChannelMessages();\n"
 "}\n"
 "let chantabRafQueued = false;\n"
 "function refreshChannelsTab(){\n"
@@ -1843,12 +1926,23 @@ static const char DASHBOARD_HTML[] =
 "    const body = parsed ? escHtml(parsed.body)\n"
 "      : ((m.summary===null || m.summary===undefined) ? '<span class=muted>\\u2014</span>' : m.summary);\n"
 "    const pathTitle = m.path ? ` title=\"${escHtml(m.path)}\"` : '';\n"
-"    const pathBtn = m.pathHex ? ` <button class=btn-mini${pathTitle} onclick=\"drawMessagePath('${m.pathHex}',${m.pathHopCount},${m.pathHashSize})\">path</button>` : '';\n"
+"    const hopLabel = m.pathHopCount > 0 ? `${m.pathHopCount} hop${m.pathHopCount===1?'':'s'}` : 'path';\n"
+"    const pathBtn = m.pathHex ? ` <button class=btn-mini${pathTitle} onclick=\"drawMessagePath('${m.pathHex}',${m.pathHopCount},${m.pathHashSize})\">${hopLabel}</button>` : '';\n"
 "    const pathHint = (!m.pathHex && m.path) ? `<span class=chat-path>${escHtml(m.path)}</span>` : '';\n"
+/* Region-scope badge (v1.10+ MeshCore flood scoping): shown next to
+ * the sender name when this message's packet carried transport
+ * codes. Resolved via dictionary attack (meshcore_region_dict.c,
+ * server-side) when the region uses a public hashtag-style name;
+ * otherwise falls back to the raw opaque scope code so the operator
+ * can still tell messages apart by scope even unresolved. */
+"    const regionCodeHex = '0x'+((m.regionCode1||0)>>>0).toString(16).padStart(4,'0');\n"
+"    const regionBadge = !m.regionScope ? '' : (m.regionName\n"
+"      ? `<span class=\"region-badge\" title=\"region scope code ${regionCodeHex}\">${escHtml(m.regionName)}</span>`\n"
+"      : `<span class=\"region-badge unresolved\" title=\"unresolved region scope\">scope ${regionCodeHex}</span>`);\n"
 "    div.innerHTML = `<div class=chat-col>`\n"
-"      + `<div class=chat-meta><b>${senderLabel}</b></div>`\n"
+"      + `<div class=chat-meta><span class=ts>${fmtTime(m.t)}</span> <b>${senderLabel}</b>${regionBadge}</div>`\n"
 "      + `<div class=chat-bubble>${body}</div>`\n"
-"      + `<div class=chat-foot><span class=ts>${fmtTime(m.t)}</span>${pathHint}${pathBtn}</div>`\n"
+"      + `<div class=chat-foot>${pathHint}${pathBtn}</div>`\n"
 "      + `</div>`;\n"
 "    frag.appendChild(div);\n"
 "  }\n"
@@ -2312,6 +2406,7 @@ static const char DASHBOARD_HTML[] =
 "}\n"
 "function topoStop(){ topoActive = false; }\n"
 "window.addEventListener('resize', ()=>{ if (topoActive) topoSize(); });\n"
+"window.addEventListener('resize', ()=>{ if (document.getElementById('live').classList.contains('active')) map.invalidateSize(); });\n"
 "topoCanvas.addEventListener('mousemove', e=>{\n"
 "  const rect = topoCanvas.getBoundingClientRect();\n"
 "  topoMouse.x = e.clientX - rect.left; topoMouse.y = e.clientY - rect.top;\n"
@@ -2324,8 +2419,56 @@ static const char DASHBOARD_HTML[] =
 "// runs: 999 -> '999', 1234 -> '1.2k', 1234567 -> '1.2M', etc.\n"
 "function fmtCount(n){if(n<1000)return String(n|0);if(n<1e6)return (n/1000).toFixed(n<10000?1:0)+'k';if(n<1e9)return (n/1e6).toFixed(n<10e6?1:0)+'M';return (n/1e9).toFixed(1)+'G';}\n"
 "function setStat(id,v){const el=document.getElementById(id);if(el)el.textContent=v;}\n"
+/* resetLiveState -- the server's SSE history ring (seeded once at
+ * startup by db_sqlite_replay_recent(), then extended by live traffic)
+ * is replayed in full to every new /events connection, including
+ * reconnects the browser makes on its own after a dropped connection
+ * (backgrounded tab, brief network hiccup, laptop sleep -- the
+ * EventSource spec auto-reconnects and fires onopen again). Without
+ * this, none of the client-side state below is cleared across that
+ * reconnect, so the replayed ring gets layered on top of what's
+ * already accumulated from the first connection and everything
+ * (channel chat, node list, message/discovery logs, topology graph)
+ * doubles up. Wiping it in onopen -- which also fires on the very
+ * first, already-empty connection -- keeps every (re)connect an
+ * idempotent full resync instead of an accumulating one. */
+"function resetLiveState(){\n"
+"  for (const id of Object.keys(markers)) map.removeLayer(markers[id]);\n"
+"  for (const id of Object.keys(markers)) delete markers[id];\n"
+"  for (const id of Object.keys(trails)) { if (trails[id].line) map.removeLayer(trails[id].line); }\n"
+"  for (const id of Object.keys(trails)) delete trails[id];\n"
+"  for (const k of Object.keys(edges)) { map.removeLayer(edges[k]); delete edges[k]; }\n"
+"  for (const k of Object.keys(nodes)) delete nodes[k];\n"
+"  for (const k of Object.keys(channels)) delete channels[k];\n"
+"  for (const k of Object.keys(chanSnr)) delete chanSnr[k];\n"
+"  regionStats.scoped = 0; regionStats.unscoped = 0;\n"
+"  for (const k of Object.keys(topoNodes)) delete topoNodes[k];\n"
+"  for (const k of Object.keys(topoEdges)) delete topoEdges[k];\n"
+"  for (const k of Object.keys(topoPairs)) delete topoPairs[k];\n"
+"  msgsEl.replaceChildren();\n"
+"  discEl.replaceChildren();\n"
+"  clearAnalyzer();\n"
+"  closeDrawer();\n"
+"  refreshNodes();\n"
+"  refreshChannels();\n"
+"  refreshChannelsTab();\n"
+/* Re-hydrate from the durable SQLite-backed bootstrap endpoints, not
+ * just whatever the server's bounded SSE history ring (<=1024 slots)
+ * happens to still cover -- otherwise a mobile reconnect (backgrounded
+ * tab, screen lock, wifi/cellular handoff all drop+reopen the
+ * EventSource) wipes every repeater/channel this session ever learned
+ * about and replaces it with only the last ~1024 events, silently
+ * dropping repeaters that haven't re-ADVERTed recently (interval can
+ * be up to a week) and channels with no traffic in that window. Same
+ * data these two already fetch once on page load (see their own doc
+ * comments above); isReconnect=true on bootstrapNodesFromApi() just
+ * skips the fitBounds() camera jump that's welcome on first load but
+ * not on every reconnect. */
+"  bootstrapNodesFromApi(true);\n"
+"  bootstrapChannelsFromApi();\n"
+"}\n"
 "const es = new EventSource('/events');\n"
-"es.onopen=()=>{const s=document.getElementById('status');if(s){s.textContent='connected';s.style.color='';}};\n"
+"es.onopen=()=>{resetLiveState();const s=document.getElementById('status');if(s){s.textContent='connected';s.style.color='';}};\n"
 "es.onerror=()=>{const s=document.getElementById('status');if(s){s.textContent='disconnected';s.style.color='#f87171';}};\n"
 "es.onmessage = (e) => {\n"
 "  let p; try { p = JSON.parse(e.data); } catch(_){ return; }\n"
@@ -2519,6 +2662,23 @@ static const char DASHBOARD_HTML[] =
 "  const isSyntheticId = /^!(4000|8000)/i.test(id);\n"
 "  if (!nodes[id]) nodes[id] = {ts:0, frames:0, synthetic:isSyntheticId};\n"
 "  const n = nodes[id]; n.ts = p.ts; n.frames = (n.frames||0) + 1;\n"
+/* Region-scope usage, attributed to the packet's ORIGINATING node
+ * (id === p.from) -- transport codes are set once by the author and
+ * carried unchanged through every relay's rebroadcast, so a repeater
+ * that only RELAYS someone else's scoped packet doesn't itself
+ * "use" that scope; only frames it authored say anything about its
+ * own region configuration. Feeds the drawer's per-repeater
+ * "Region scoping" section and its no-scope warning. */
+"  if (p.region_scope === true) {\n"
+"    n.regionScopedCount = (n.regionScopedCount||0) + 1;\n"
+"    const rname = p.region_name || ('0x'+((p.region_code1||0)>>>0).toString(16).padStart(4,'0'));\n"
+"    if (!n.regionScopes) n.regionScopes = {};\n"
+"    n.regionScopes[rname] = (n.regionScopes[rname]||0) + 1;\n"
+"    regionStats.scoped++;\n"
+"  } else {\n"
+"    n.regionUnscopedCount = (n.regionUnscopedCount||0) + 1;\n"
+"    regionStats.unscoped++;\n"
+"  }\n"
 "  if (p.snr_db !== undefined) n.snr_db = p.snr_db;\n"
 "  if (p.decrypted === false) n.has_encrypted = true;\n"
 "  if (p.long_name) n.name = p.long_name + (p.short_name ? ' ['+p.short_name+']' : '');\n"
@@ -2679,7 +2839,7 @@ static const char DASHBOARD_HTML[] =
  * this function intentionally does NOT call into es.onmessage itself,
  * since that dispatcher has many live-only side effects (discovery
  * panel, relay-hop edges, etc.) that don't apply to bootstrap data. */
-"async function bootstrapNodesFromApi(){\n"
+"async function bootstrapNodesFromApi(isReconnect){\n"
 "  try {\n"
 "    const r = await fetch('/api/nodes');\n"
 "    if (!r.ok) return;\n"
@@ -2708,7 +2868,7 @@ static const char DASHBOARD_HTML[] =
 "        addedLatLngs.push(ll);\n"
 "      }\n"
 "    }\n"
-"    if (addedLatLngs.length) map.fitBounds(addedLatLngs, {maxZoom:10});\n"
+"    if (!isReconnect && addedLatLngs.length) map.fitBounds(addedLatLngs, {maxZoom:10});\n"
 "    refreshNodes();\n"
 "  } catch(e) {}\n"
 "}\n"
@@ -3594,6 +3754,8 @@ static void *web_thread(void *arg)
             strncmp(buf, "GET /index",   10) == 0) serve_index(fd);
         else if (strncmp(buf, "GET /events", 11) == 0) promote_to_sse(fd);
         else if (strncmp(buf, "GET /api/messages", 17) == 0) handle_api_messages(fd, buf);
+        else if (strncmp(buf, "GET /api/node-history", 21) == 0) handle_api_node_history(fd, buf);
+    else if (strncmp(buf, "GET /api/telemetry", 19) == 0) handle_api_telemetry(fd, buf);
         else if (strncmp(buf, "GET /api/nodes", 14) == 0) handle_api_nodes(fd, buf);
         else if (strncmp(buf, "GET /api/meshcore-channels", 26) == 0) handle_api_meshcore_channels(fd, buf);
         else if (strncmp(buf, "GET /api/stats", 14) == 0) handle_api_stats(fd, buf);
