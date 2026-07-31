@@ -424,6 +424,19 @@ int meshcore_packet_decode_with_radio(const uint8_t *frame, size_t frame_len,
     ev.mc_hdr_path_len = pkt.path_len < sizeof(ev.mc_hdr_path)
                         ? (int)pkt.path_len : (int)sizeof(ev.mc_hdr_path);
     memcpy(ev.mc_hdr_path, pkt.path, (size_t)ev.mc_hdr_path_len);
+    ev.mc_has_region_scope = pkt.has_transport_codes;
+    if (pkt.has_transport_codes) {
+        ev.mc_region_code1 = pkt.transport_code1;
+        ev.mc_region_code2 = pkt.transport_code2;
+        /* Fast (cache-only) lookup here -- cheap enough for the live
+         * decode hot path. A miss is handed to the background
+         * dictionary worker instead of resolved inline; see
+         * meshcore_region_dict.h for why the full wordlist scan must
+         * never run synchronously here. */
+        if (!meshcore_region_resolve_fast(pkt.payload_type, pkt.payload, pkt.payload_len,
+                                          pkt.transport_code1, ev.mc_region_name, sizeof(ev.mc_region_name)))
+            meshcore_region_dict_enqueue(pkt.payload_type, pkt.payload, pkt.payload_len, pkt.transport_code1);
+    }
     hex_dump(frame, frame_len > 256 ? 256 : frame_len, ev.raw_hex, sizeof(ev.raw_hex));
 
     bool ok;
