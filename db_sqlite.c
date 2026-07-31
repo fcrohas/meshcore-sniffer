@@ -906,33 +906,33 @@ char *db_sqlite_query_channel_names_json(void)
     if (!g_db) return NULL;
 
     sqlite3_stmt *stmt = NULL;
-    /* Bare-column trick (documented SQLite behavior): with a single
-     * MAX() aggregate and GROUP BY, non-aggregated columns in the
-     * result set are taken from the row that produced the max value --
-     * so channel_name here is always the most recently observed name
-     * for that hash, not an arbitrary row's (which could be NULL, from
-     * an undecrypted frame sharing the same channel_hash bucket).
+    /* GROUP BY (channel_hash, channel_name), NOT channel_hash alone:
+     * the 1-byte channel_hash collides constantly (only 256 values),
+     * so two completely distinct, independently-decrypting channels
+     * routinely share the same hash (e.g. real case: "#meteo" and
+     * "#lazarus" both hashing to 0x78) -- grouping by hash alone
+     * silently merged them into one row, picking whichever name was
+     * most recently seen and overwriting the other's identity in the
+     * dashboard's Channels-tab bootstrap.
      *
-     * The outer query joins back onto ALL events for a named hash (not
-     * just the ones carrying a name) to get a real total/decrypted/
-     * last_ts -- otherwise a channel whose PSK was only cracked partway
-     * through its history would undercount messages seen before the
-     * crack. Without this, the dashboard's Channels-tab bootstrap
-     * (bootstrapChannelsFromApi() in web.c) had nothing but a name for
-     * a channel with no *live* traffic yet this session, and seeded
-     * total=0/ts=0 stand-ins that rendered as "0 messages" and a
-     * decades-long "ago" despite the channel having real history. */
+     * This intentionally only counts rows that carry THIS row's exact
+     * channel_name -- an earlier version joined back to count every
+     * row on the hash (including still-undecrypted ones) toward a
+     * single channel's total, which was fine for the 1-channel-per-
+     * hash assumption but silently double-counts across colliding
+     * channels once that assumption breaks: an undecrypted row on a
+     * shared hash could belong to either channel (or a third, still-
+     * unknown one), so it can't be correctly attributed to any named
+     * channel's count. The tradeoff: a channel whose PSK was only
+     * cracked partway through its history undercounts messages seen
+     * before the crack (same as before this table existed at all). */
     static const char *SQL =
-        "SELECT e.channel_hash, names.channel_name, COUNT(*), "
-        "SUM(CASE WHEN e.decrypted = 1 THEN 1 ELSE 0 END), MAX(e.ts) "
-        "FROM events e JOIN ("
-        "  SELECT channel_hash, channel_name, MAX(ts) AS name_ts FROM events "
-        "  WHERE protocol='meshcore' AND channel_hash IS NOT NULL "
-        "  AND channel_name IS NOT NULL AND channel_name != '' "
-        "  GROUP BY channel_hash"
-        ") names ON names.channel_hash = e.channel_hash "
-        "WHERE e.protocol='meshcore' AND e.channel_hash IS NOT NULL "
-        "GROUP BY e.channel_hash";
+        "SELECT channel_hash, channel_name, COUNT(*), "
+        "SUM(CASE WHEN decrypted = 1 THEN 1 ELSE 0 END), MAX(ts) "
+        "FROM events "
+        "WHERE protocol='meshcore' AND channel_hash IS NOT NULL "
+        "AND channel_name IS NOT NULL AND channel_name != '' "
+        "GROUP BY channel_hash, channel_name";
     if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
         fprintf(stderr, "db_sqlite: channel-names query failed: %s\n", sqlite3_errmsg(g_db));
         return NULL;

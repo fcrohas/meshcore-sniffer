@@ -484,6 +484,18 @@ static const char DASHBOARD_HTML[] =
 "// Apply persisted theme (also adds the matching tile layer to the map).\n"
 "setTheme((function(){try{return localStorage.getItem('theme')||'dark';}catch(e){return 'dark';}})());\n"
 "const markers = {}, trails = {}, nodes = {}, edges = {}, channels = {};\n"
+/* channels{} MUST be keyed by (hash, name), not hash alone: MeshCore's
+ * channel_hash is a single byte (256 values), so two completely
+ * distinct, independently-decrypting channels routinely collide on
+ * the same hash (seen in practice: "#meteo" and "#lazarus" both
+ * hashing to 0x78) -- keying by hash alone silently merged their
+ * messages into one thread and flip-flopped the displayed name
+ * between them every time a message from the other channel arrived.
+ * Undecrypted traffic (channel_name unknown -- could belong to either
+ * colliding channel, or a third unknown one) pools under the bare-
+ * hash key since it can't be attributed to a specific channel. */
+"function chanKey(hash, name){ return name ? (hash + '|' + name) : String(hash); }\n"
+"function chanKeyHash(key){ return parseInt(key, 10); }\n"
 "const msgsEl = document.getElementById('msgs'); const discEl = document.getElementById('disc'); const tbody = document.querySelector('#nodes tbody');\n"
 "// Delegated click handler: 'promote' button on an OFF_GRID_LORA row\n"
 "// POSTs the discovered freq + sensible (BW, SF, CR) to /api/extra-freq.\n"
@@ -640,12 +652,58 @@ static const char DASHBOARD_HTML[] =
 "    if (h.positions.length > NODE_HIST_POS) h.positions.length = NODE_HIST_POS;\n"
 "  }\n"
 "  if (p.channel_hash !== undefined) {\n"
-"    const k = p.channel_hash;\n"
+"    const k = chanKey(p.channel_hash, p.channel_name);\n"
 "    if (!h.channels[k]) h.channels[k] = {n:0, name:p.channel_name||null};\n"
 "    h.channels[k].n++;\n"
 "    if (p.channel_name) h.channels[k].name = p.channel_name;\n"
 "  }\n"
 "  if (drawerNodeId === id) refreshDrawer();\n"
+"}\n"
+/* loadNodeHistoryFromApi -- one-shot hydration of a node's drawer
+ * history (msgs/positions/snr/channels) from the SQLite-backed
+ * /api/node-history, the same idea as bootstrapNodesFromApi()/
+ * bootstrapChannelsFromApi(): nodeHistory()'s rings are otherwise
+ * built ONLY from live SSE traffic seen since page load/last
+ * reconnect, so opening the drawer for a repeater that's been quiet
+ * this session (or was cracked/known long before this browser tab
+ * connected) shows an almost-empty panel even though the DB has a
+ * full history. Runs once per node per session (n._histLoaded);
+ * REPLACES the rings rather than merging with whatever live traffic
+ * already accumulated, since every live event is also already
+ * persisted to the DB by the time it reaches this browser over SSE --
+ * merging would just duplicate those rows. */
+"async function loadNodeHistoryFromApi(id){\n"
+"  const n = nodes[id]; if (!n || n._histLoaded) return;\n"
+"  n._histLoaded = true;\n"
+"  try {\n"
+"    const r = await fetch(`/api/node-history?id=${encodeURIComponent(id)}&limit=300`);\n"
+"    if (!r.ok) return;\n"
+"    const j = await r.json();\n"
+"    const events = j.events || []; // newest-first (DESC ts), same convention as the query.\n"
+"    const msgs = [], positions = [], channels = {};\n"
+"    for (const p of events) {\n"
+"      if (p.text) msgs.push({t:p.ts, ch:p.channel_name||'', text:p.text});\n"
+"      if (p.lat !== undefined && p.lon !== undefined) positions.push({t:p.ts, lat:p.lat, lon:p.lon});\n"
+"      if (p.channel_hash !== undefined) {\n"
+"        const k = chanKey(p.channel_hash, p.channel_name);\n"
+"        if (!channels[k]) channels[k] = {n:0, name:p.channel_name||null};\n"
+"        channels[k].n++;\n"
+"        if (p.channel_name) channels[k].name = p.channel_name;\n"
+"      }\n"
+"    }\n"
+"    // Sparkline wants oldest-first (matches noteNodeFrame()'s push() order); events[] is newest-first, so walk it backwards.\n"
+"    const snr = [];\n"
+"    for (let i = events.length - 1; i >= 0; i--) {\n"
+"      const p = events[i];\n"
+"      if (p.snr_db !== undefined) snr.push({t:p.ts, v:p.snr_db});\n"
+"    }\n"
+"    const h = nodeHistory(id); if (!h) return;\n"
+"    h.msgs = msgs.slice(0, NODE_HIST_MSGS);\n"
+"    h.positions = positions.slice(0, NODE_HIST_POS);\n"
+"    h.snr = snr.slice(-NODE_HIST_SNR);\n"
+"    h.channels = channels;\n"
+"    if (drawerNodeId === id) refreshDrawer();\n"
+"  } catch (e) { n._histLoaded = false; /* allow a retry on next open */ }\n"
 "}\n"
 "// Drawer: per-node detail panel that slides in on row-click.\n"
 "let drawerNodeId = null;\n"
@@ -725,10 +783,35 @@ static const char DASHBOARD_HTML[] =
 "  if (h && Object.keys(h.channels).length) {\n"
 "    dChan.innerHTML = Object.keys(h.channels).map(k=>{\n"
 "      const c = h.channels[k];\n"
-"      const hex = '0x'+(parseInt(k)&0xff).toString(16).padStart(2,'0');\n"
+"      const hex = '0x'+(chanKeyHash(k)&0xff).toString(16).padStart(2,'0');\n"
 "      return `<div class=item>${c.name||'<span class=muted>(encrypted)</span>'} <span class=muted>${hex} | ${c.n} frames</span></div>`;\n"
 "    }).join('');\n"
 "  } else dChan.innerHTML = '<div class=muted>no channel data</div>';\n"
+/* Region scoping (v1.10+ flood scoping): only counts frames this
+ * node itself AUTHORED (see the regionScopedCount/regionUnscopedCount
+ * bookkeeping in es.onmessage) -- a repeater's rebroadcasts of other
+ * nodes' scoped traffic don't reflect its own configuration. Flags a
+ * likely misconfiguration when the network overall uses scoping
+ * meaningfully but this node's own traffic mostly doesn't. */
+"  const rScoped = n.regionScopedCount || 0, rUnscoped = n.regionUnscopedCount || 0;\n"
+"  const rTotal = rScoped + rUnscoped;\n"
+"  if (rTotal === 0) {\n"
+"    dRegion.innerHTML = '<div class=muted>no region-scope data (no frames authored by this node observed)</div>';\n"
+"  } else {\n"
+"    const names = Object.keys(n.regionScopes||{}).sort((a,b)=>n.regionScopes[b]-n.regionScopes[a]);\n"
+"    const badges = names.map(nm=>{\n"
+"      const unresolved = /^0x[0-9a-f]{4}$/i.test(nm);\n"
+"      return `<span class=\"region-badge${unresolved?' unresolved':''}\">${escHtml(nm)} <span class=muted>(${n.regionScopes[nm]})</span></span>`;\n"
+"    }).join('');\n"
+"    const netScopedRatio = regionStats.scoped / Math.max(1, regionStats.scoped + regionStats.unscoped);\n"
+"    const nodeScopedRatio = rScoped / rTotal;\n"
+"    const warn = (rTotal >= 3 && netScopedRatio > 0.2 && nodeScopedRatio < 0.1)\n"
+"      ? `<div class=status-err style=\"margin-top:6px;font-size:11px\">no region scope on ${rUnscoped}/${rTotal} of this node's own frames, while ${(netScopedRatio*100).toFixed(0)}% of network traffic is scoped -- possible misconfiguration</div>`\n"
+"      : '';\n"
+"    dRegion.innerHTML = `<div style=\"margin-bottom:4px\">${badges || '<span class=muted>none resolved/scoped</span>'}</div>`\n"
+"      + `<div class=muted style=\"font-size:11px\">${rScoped}/${rTotal} of this node's own frames carried a region scope</div>`\n"
+"      + warn;\n"
+"  }\n"
 "}\n"
 "function escHtml(s){return String(s).replace(/[&<>\"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;','\\'':'&#39;'}[c]));}\n"
 "let channelsRafQueued = false;\n"
@@ -793,7 +876,7 @@ static const char DASHBOARD_HTML[] =
 "  const hashes = Object.keys(channels).sort((a,b)=>channels[b].ts-channels[a].ts);\n"
 "  const frag = document.createDocumentFragment();\n"
 "  for (const h of hashes){const c=channels[h]; const tr=document.createElement('tr');\n"
-"    const hashHex = '0x'+(parseInt(h)&0xff).toString(16).padStart(2,'0');\n"
+"    const hashHex = '0x'+(chanKeyHash(h)&0xff).toString(16).padStart(2,'0');\n"
 "    // Channel name comes from decrypted frame metadata. If we've never\n"
 "    // successfully decrypted a frame on this hash, we know the hash but\n"
 "    // not the operator's name for the channel -- show '(encrypted)'\n"
@@ -1468,7 +1551,7 @@ static const char DASHBOARD_HTML[] =
 "    const c = channels[h];\n"
 "    const tr = document.createElement('tr');\n"
 "    tr.className = 'chan-row' + (h === selectedChannelHash ? ' selected' : '');\n"
-"    const hashHex = '0x'+(parseInt(h)&0xff).toString(16).padStart(2,'0');\n"
+"    const hashHex = '0x'+(chanKeyHash(h)&0xff).toString(16).padStart(2,'0');\n"
 "    const name = c.name || '<span class=muted>(encrypted)</span>';\n"
 "    const proto = c.protocol === 'meshcore' ? 'MeshCore' : (c.preset || '<span class=muted>--</span>');\n"
 "    tr.innerHTML = `<td>${hashHex}</td><td>${name}</td><td>${proto}</td><td>${fmtCount(c.total)}</td><td>${fmtAgo(c.ts)}</td>`;\n"
@@ -1522,7 +1605,7 @@ static const char DASHBOARD_HTML[] =
 "    chantabMsgsLoadOlderWrap.style.display = 'none';\n"
 "    return;\n"
 "  }\n"
-"  const hashHex = '0x'+(parseInt(h)&0xff).toString(16).padStart(2,'0');\n"
+"  const hashHex = '0x'+(chanKeyHash(h)&0xff).toString(16).padStart(2,'0');\n"
 "  chantabMsgsTitle.innerHTML = `Messages <span class=muted>${c.name || '(encrypted)'} ${hashHex}</span>`;\n"
 "  const hist = [...(c._msgs||[]), ...(c._older||[])];\n"
 "  chantabMsgsEmpty.style.display = hist.length ? 'none' : 'block';\n"
@@ -1562,11 +1645,18 @@ static const char DASHBOARD_HTML[] =
 "  chantabMsgsLoadOlderBtn.disabled = true;\n"
 "  chantabMsgsLoadOlderStatus.textContent = 'loading...';\n"
 "  try {\n"
-"    const resp = await fetch(`/api/messages?channel=${encodeURIComponent(h)}&before=${oldestTs}&limit=100`);\n"
+"    const resp = await fetch(`/api/messages?channel=${chanKeyHash(h)}&before=${oldestTs}&limit=100`);\n"
 "    if (!resp.ok) throw new Error('http '+resp.status);\n"
 "    const j = await resp.json();\n"
+/* The hash alone is ambiguous on a collision -- the API has no way to
+ * filter by name (it's not a stored column keyed the same way), so
+ * it returns every message on this raw hash, which can include the
+ * OTHER colliding channel's history. Filter to just this specific
+ * channel identity before appending: matching name, or (for the
+ * bare-hash "(encrypted)" bucket) still-undecrypted rows only. */
+"    const matches = (p) => c.name ? (p.channel_name === c.name) : !p.channel_name;\n"
 "    if (!c._older) c._older = [];\n"
-"    for (const p of (j.messages||[])) c._older.push(buildMsgRow(p, msgSummary(p)));\n"
+"    for (const p of (j.messages||[])) if (matches(p)) c._older.push(buildMsgRow(p, msgSummary(p)));\n"
 "    if (!j.more) c._olderDone = true;\n"
 "    chantabMsgsLoadOlderStatus.textContent = (j.messages||[]).length ? '' : 'no older messages';\n"
 "  } catch (e) { chantabMsgsLoadOlderStatus.textContent = 'failed to load'; }\n"
@@ -2075,8 +2165,9 @@ static const char DASHBOARD_HTML[] =
 "  if (p.event === 'MC_CHANNEL_DISCOVERED' || p.event === 'MC_CHANNEL_ADDED') {\n"
 "    const h = p.channel_hash;\n"
 "    if (h !== undefined) {\n"
-"      if (!channels[h]) channels[h] = {total:0, decrypted:0, ts:Date.now()/1000, slots:new Set()};\n"
-"      channels[h].name = p.channel_name;\n"
+"      const key = chanKey(h, p.channel_name);\n"
+"      if (!channels[key]) channels[key] = {total:0, decrypted:0, ts:Date.now()/1000, slots:new Set()};\n"
+"      channels[key].name = p.channel_name;\n"
 /* A channel added/cracked after some of its traffic was already
  * captured gets its historical rows retroactively re-decrypted
  * server-side (meshcore_redecrypt.c) -- but this browser's in-memory
@@ -2163,7 +2254,7 @@ static const char DASHBOARD_HTML[] =
 "  traceLivePath(p);\n"
 "  // Per-channel stats: bucket by channel_hash so unknown networks are visible too.\n"
 "  if (p.channel_hash !== undefined){\n"
-"    const h = p.channel_hash;\n"
+"    const h = chanKey(p.channel_hash, p.channel_name);\n"
 "    if (!channels[h]) channels[h] = {total:0, decrypted:0, ts:0, slots:new Set()};\n"
 "    const c = channels[h]; c.total++; c.ts = p.ts;\n"
 "    if (p.channel_name) c.name = p.channel_name;\n"
@@ -2255,7 +2346,7 @@ static const char DASHBOARD_HTML[] =
 "    ? '<span class=muted style=\"color:#38bdf8\">[focused]</span> ' : '';\n"
 "  const summary = msgSummary(p);\n"
 "  if (summary) pushTo(msgsEl, `${focusedBadge}<b>${msgFromLabel(p,n,id)}</b> <span class=muted>${p.channel_name||''}</span> <span class=port>${p.port_name||''}</span>: ${summary}`, p.ts);\n"
-"  if (p.channel_hash !== undefined) { noteChannelMessage(p.channel_hash, p, summary); refreshChannelsTab(); }\n"
+"  if (p.channel_hash !== undefined) { noteChannelMessage(chanKey(p.channel_hash, p.channel_name), p, summary); refreshChannelsTab(); }\n"
 "  if (p.atak_callsign) pushTo(discEl, `<span class=atak>ATAK ${p.atak_callsign} (${p.atak_team}/${p.atak_role})${p.atak_chat?' chat: '+p.atak_chat:''}</span>`, p.ts);\n"
 "  noteNodeFrame(id, p);\n"
 "  evictNodes();\n"
@@ -2425,14 +2516,19 @@ static const char DASHBOARD_HTML[] =
 "    for (const c of (data.channels||[])) {\n"
 "      const h = c.channel_hash;\n"
 "      if (h === undefined || h === null) continue;\n"
-"      if (!channels[h]) {\n"
-"        channels[h] = {\n"
+/* /api/meshcore-channels now returns one row per distinct (hash,name)
+ * pair (see db_sqlite_query_channel_names_json()'s fix), so this
+ * naturally seeds a separate bucket per colliding channel instead of
+ * merging them under one hash. */
+"      const key = chanKey(h, c.channel_name);\n"
+"      if (!channels[key]) {\n"
+"        channels[key] = {\n"
 "          total: c.total || 0, decrypted: c.decrypted || 0,\n"
 "          ts: c.last_ts || 0, protocol: c.protocol || 'meshcore',\n"
 "          slots: new Set(),\n"
 "        };\n"
 "      }\n"
-"      if (c.channel_name) channels[h].name = c.channel_name;\n"
+"      if (c.channel_name) channels[key].name = c.channel_name;\n"
 "    }\n"
 "    refreshChannels();\n"
 "    refreshChannelsTab();\n"
