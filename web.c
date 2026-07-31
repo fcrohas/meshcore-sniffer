@@ -935,6 +935,10 @@ static const char DASHBOARD_HTML[] =
 "  return p.crc_corrected ? 'corrected' : 'ok';\n"
 "}\n"
 "function analyzerNodeLabel(p){\n"
+"  if (p.protocol === 'meshcore' &&\n"
+"      (p.mc_type === 'TXT_MSG' || p.mc_type === 'REQ' || p.mc_type === 'RESPONSE' || p.mc_type === 'PATH')) {\n"
+"    return `dest=${hashHint(p.dest_hash)} src=${hashHint(p.src_hash)}`;\n"
+"  }\n"
 "  return p.node_name || p.long_name || p.from || '';\n"
 "}\n"
 "function analyzerChanLabel(p){\n"
@@ -1153,15 +1157,42 @@ static const char DASHBOARD_HTML[] =
 "// so show that pair directly instead of the synthetic !4000xxxx id.\n"
 "// Everything else (including ANON_REQ, keyed off a real pubkey prefix)\n"
 "// falls back to the normal node name/id.\n"
+/* Best-effort dest_hash/src_hash -> node name resolution. dest_hash/
+ * src_hash (TXT_MSG/REQ/RESPONSE/PATH's envelope, 1 byte each) is
+ * literally pub_key[0] (MeshCore firmware's Identity::copyHashTo(),
+ * confirmed against src/Identity.h) -- the SAME byte that's also the
+ * first byte of every ADVERT-derived node id ("!XXxxxxxx", see
+ * mc_node_id() in db_sqlite.c / mc_derive_from_id() in
+ * feed_meshcore_json.c). So any already-known, non-synthetic node
+ * whose id starts with that byte is a candidate for "who this packet
+ * is addressed to/from" -- still can't decrypt the payload (no ECDH
+ * key), but at least ties the traffic to a name instead of an opaque
+ * hex byte. Genuinely ambiguous on a collision (1-in-256 by chance,
+ * worse with many known nodes) -- shown as a joined list rather than
+ * silently picking one. */
+"function resolveHashCandidates(byte) {\n"
+"  if (byte === undefined || byte === null) return [];\n"
+"  const hex = byte.toString(16).padStart(2,'0');\n"
+"  const out = [];\n"
+"  for (const id of Object.keys(nodes)) {\n"
+"    if (/^!(4000|8000)/i.test(id)) continue;\n"
+"    if (id.slice(1,3).toLowerCase() === hex) out.push(nodes[id].name || id);\n"
+"  }\n"
+"  return out;\n"
+"}\n"
+"function hashHint(byte) {\n"
+"  if (byte === undefined || byte === null) return '?';\n"
+"  const hex = '0x'+byte.toString(16).padStart(2,'0');\n"
+"  const cands = resolveHashCandidates(byte);\n"
+"  return cands.length ? `${hex} (${cands.join(' or ')})` : hex;\n"
+"}\n"
 "function msgFromLabel(p, n, id) {\n"
 "  if (p.protocol === 'meshcore') {\n"
 "    if (p.mc_type === 'GRP_TXT' || p.mc_type === 'GRP_DATA') {\n"
 "      return '#' + (p.channel_name || ('0x' + (p.channel_hash||0).toString(16).padStart(2,'0')));\n"
 "    }\n"
 "    if (p.mc_type === 'TXT_MSG' || p.mc_type === 'REQ' || p.mc_type === 'RESPONSE' || p.mc_type === 'PATH') {\n"
-"      const d = p.dest_hash !== undefined ? '0x'+p.dest_hash.toString(16).padStart(2,'0') : '?';\n"
-"      const s = p.src_hash  !== undefined ? '0x'+p.src_hash.toString(16).padStart(2,'0')  : '?';\n"
-"      return `dest=${d} src=${s}`;\n"
+"      return `dest=${hashHint(p.dest_hash)} src=${hashHint(p.src_hash)}`;\n"
 "    }\n"
 "  }\n"
 "  return n.name || id;\n"
