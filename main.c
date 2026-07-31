@@ -818,6 +818,7 @@ typedef struct {
     bool     has_crc;
     bool     payload_crc_ok;
     bool     crc_corrected;
+    int      crc_corrected_bits;
     float    cfo_hz;
     uint64_t station_t_ns;     /* first-replica realtime ns */
     uint32_t station_t_acc_ns; /* operator-self-reported clock-discipline class */
@@ -840,6 +841,7 @@ static void on_mesh_event(const mesh_event_t *ev, void *user) {
         stamped.has_crc          = ctx->has_crc;
         stamped.payload_crc_ok   = ctx->payload_crc_ok;
         stamped.crc_corrected    = ctx->crc_corrected;
+        stamped.crc_corrected_bits = ctx->crc_corrected_bits;
         stamped.cfo_hz           = ctx->cfo_hz;
         stamped.station_t_ns     = ctx->station_t_ns;
         stamped.station_t_acc_ns = ctx->station_t_acc_ns;
@@ -857,6 +859,43 @@ static void on_mesh_event(const mesh_event_t *ev, void *user) {
         if (stamped.has_crc && !stamped.payload_crc_ok) {
             stamped.decrypted = false;
         }
+    }
+    /* A 2-bit CRC "fix" is a bare CRC-16 match extended into a search
+     * space large enough that accidental collisions are common (see
+     * lora_crc_bruteforce_correct_2bit's doc) -- unlike the single-bit
+     * case in general, CRC agreement alone isn't enough. So any 2-bit
+     * fix is gated on independent authentication that validates
+     * (mesh_event_crc2bit_trusted(): MeshCore GRP_TXT/GRP_DATA's
+     * per-channel HMAC or ADVERT's Ed25519 signature).
+     *
+     * Single-bit fixes are trustworthy at a MUCH lower false-positive
+     * rate (search space ~n vs ~n^2/2 candidates against the same
+     * 65536-value CRC16), but not a *zero* rate: for a ~1000-bit
+     * payload the a priori odds of an accidental single-bit collision
+     * are still ~1.5%. Confirmed in practice -- a real capture
+     * produced a single-bit "recovery" whose CRC matched but whose
+     * Ed25519 signature did not (0/364 genuinely clean ADVERTs in the
+     * same dataset fail that check). Since GRP_TXT/GRP_DATA/ADVERT
+     * already get this authentication computed for free during
+     * decode regardless of which tier corrected them, require it for
+     * single-bit fixes on those payload types too -- it's free
+     * additional confidence, not a new cost. Payload types with no
+     * authentication mechanism in this codebase (ACK, TXT_MSG, etc.)
+     * have no stronger signal available, so single-bit fixes on those
+     * stay trusted as before; only 2-bit fixes on those are gated
+     * (and always fail the gate, since mesh_event_crc2bit_trusted()
+     * returns false for every payload type without a check). */
+    bool crc_recovery_authable = stamped.is_meshcore &&
+        (stamped.mc_payload_type == MC_PAYLOAD_GRP_TXT ||
+         stamped.mc_payload_type == MC_PAYLOAD_GRP_DATA ||
+         stamped.mc_payload_type == MC_PAYLOAD_ADVERT);
+    bool crc_recovery_needs_gate = stamped.crc_corrected_bits >= 2 ||
+        (stamped.crc_corrected_bits == 1 && crc_recovery_authable);
+    if (crc_recovery_needs_gate && !mesh_event_crc2bit_trusted(&stamped)) {
+        stamped.payload_crc_ok     = false;
+        stamped.crc_corrected      = false;
+        stamped.crc_corrected_bits = 0;
+        stamped.decrypted          = false;
     }
     /* Count after the CRC-fail override so the stats counter agrees
      * with what the JSON output reports. A channel-hash-matched but
@@ -953,6 +992,7 @@ static void dedup_emit_locked(const dedup_entry_t *e)
         .has_crc          = e->best_meta.has_crc,
         .payload_crc_ok   = e->best_meta.payload_crc_ok,
         .crc_corrected    = e->best_meta.crc_corrected,
+        .crc_corrected_bits = e->best_meta.crc_corrected_bits,
         .cfo_hz           = e->best_meta.cfo_hz,
         .station_t_ns     = e->first_seen_t_ns,
         .station_t_acc_ns = (uint32_t)opt_station_t_acc_ns,

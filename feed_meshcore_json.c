@@ -89,6 +89,13 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
                          ? route_type_names[ev->mc_route_type] : "unknown";
         jw_field_str(j, "route_type_name", rtn);
     }
+    if (ev->mc_has_region_scope) {
+        jw_field_bool(j, "region_scope", true);
+        jw_field_u32(j, "region_code1", (uint32_t)ev->mc_region_code1);
+        jw_field_u32(j, "region_code2", (uint32_t)ev->mc_region_code2);
+        if (ev->mc_region_name[0])
+            jw_field_str(j, "region_name", ev->mc_region_name);
+    }
     /* Header-level routing path: present on every payload_type's
      * packet framing, but its MEANING differs for TRACE. For every
      * other payload_type it's the accumulated relay-hash trail (FLOOD)

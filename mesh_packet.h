@@ -62,9 +62,19 @@ typedef struct mesh_event {
      * mean "no useful value to report" and feed.c suppresses them. */
     bool           has_crc;          /* payload had a trailing CRC16 trailer */
     bool           payload_crc_ok;   /* CRC verified; meaningful only when has_crc */
-    bool           crc_corrected;    /* payload_crc_ok is true only via a single-bit
-                                       * brute-force fix (lora_crc_bruteforce_correct);
+    bool           crc_corrected;    /* payload_crc_ok is true only via a
+                                       * brute-force fix (see crc_corrected_bits);
                                        * see lora_frame_meta_t.crc_corrected */
+    int            crc_corrected_bits; /* 0/1/2; see lora_frame_meta_t.crc_corrected_bits.
+                                       * A value of 2 is NOT trustworthy on CRC
+                                       * agreement alone -- call
+                                       * mesh_event_crc2bit_trusted() before
+                                       * treating it as genuine. main.c's
+                                       * on_mesh_event already does this and
+                                       * resets an untrusted 2-bit fix back to
+                                       * an ordinary CRC failure before publish,
+                                       * so any crc_corrected_bits==2 reaching
+                                       * feed.c/db_sqlite.c is already trusted. */
     float          cfo_hz;           /* carrier-frequency offset estimate */
 
     /* Per-station capture timestamp + self-reported accuracy (ns).
@@ -201,5 +211,22 @@ int mesh_packet_decode_with_radio(const uint8_t *frame, size_t frame_len,
                                   int sf, int cr, int bw_hz,
                                   const keyset_t *keys,
                                   mesh_event_cb_t cb, void *user);
+
+/* True if a crc_corrected_bits>=2 frame carries independent
+ * authentication that also validates -- MeshCore GRP_TXT/GRP_DATA's
+ * per-channel 2-byte truncated HMAC (ev->decrypted, checked in
+ * meshcore_verify_and_decrypt()) or ADVERT's Ed25519 signature
+ * (ev->mc_sig_valid, checked unconditionally in
+ * meshcore_advert_verify_signature()). A bare 2-bit CRC16 match
+ * collides with wrong content often enough (see
+ * lora_crc_bruteforce_correct_2bit's doc) that CRC agreement alone
+ * is not sufficient evidence; two independent ~1-in-65536 checks
+ * passing by accident on the same wrong content is ~1-in-4-billion.
+ * Every other payload type (no MAC/signature in this codebase) and
+ * the entire Meshtastic protocol path (is_meshcore false, no
+ * equivalent authentication) always return false here. A pure
+ * function so it's directly unit-testable; the actual gate lives in
+ * main.c's on_mesh_event(). */
+bool mesh_event_crc2bit_trusted(const mesh_event_t *ev);
 
 #endif

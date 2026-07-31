@@ -480,3 +480,14 @@ int meshcore_packet_decode_with_radio(const uint8_t *frame, size_t frame_len,
     }
     return 0;
 }
+
+bool mesh_event_crc2bit_trusted(const mesh_event_t *ev)
+{
+    if (!ev->is_meshcore) return false;
+    if ((ev->mc_payload_type == MC_PAYLOAD_GRP_TXT ||
+         ev->mc_payload_type == MC_PAYLOAD_GRP_DATA) && ev->decrypted)
+        return true;
+    if (ev->mc_payload_type == MC_PAYLOAD_ADVERT && ev->mc_sig_valid)
+        return true;
+    return false;
+}
