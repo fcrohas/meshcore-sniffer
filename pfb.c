@@ -180,8 +180,17 @@ struct pfb {
     float complex     nco_phasor;
     float complex     nco_current;
     int               nco_renorm;
-    /* Per-bin sink lists (sized M, NULL for unused bins). */
+    /* Per-bin sink lists (sized M, NULL for unused bins). Published via
+     * __atomic_store_n(..., __ATOMIC_RELEASE) in pfb_register_bin and
+     * read via __atomic_load_n(..., __ATOMIC_ACQUIRE) everywhere else
+     * (emit_to_bin, pfb_one_cycle/pfb_cycle_os's NULL-check gates,
+     * pfb_flush) -- registering a new sink on an already-active,
+     * already-processing pfb_t (runtime channel add, see channelizer.c's
+     * add_mu) must not race with the sample-pump thread concurrently
+     * walking this same linked list. bins_mu below serialises writers
+     * against each other; readers stay lock-free. */
     bin_sink_t      **bins;
+    pthread_mutex_t   bins_mu;
     /* Quiescence tracking: incremented when a sink buffer is submitted to
      * a worker, decremented when the worker completes the cb. pfb_flush
      * waits for this to reach 0. */
@@ -484,6 +493,7 @@ pfb_t *pfb_create(int M, int L, double pre_shift_hz, double samp_rate)
     p->warmup_remaining = (L - 1) / 2 + 1;
 
     pthread_mutex_init(&p->flush_mu, NULL);
+    pthread_mutex_init(&p->bins_mu, NULL);
     pthread_cond_init(&p->flush_cv, NULL);
     atomic_store(&p->in_flight, 0);
 
@@ -500,6 +510,7 @@ pfb_t *pfb_create(int M, int L, double pre_shift_hz, double samp_rate)
         /* Inline minimal teardown -- we never bumped pool refcount, so
          * don't go through pfb_destroy() (which would decrement). */
         pthread_mutex_destroy(&p->flush_mu);
+        pthread_mutex_destroy(&p->bins_mu);
         pthread_cond_destroy(&p->flush_cv);
         if (p->fft_plan) {
             fftw_planner_lock();
@@ -564,9 +575,16 @@ int pfb_register_bin(pfb_t *p, int bin, int channel_id,
         s->free_stack[s->free_top++] = s->bufs[i];
     pthread_mutex_init(&s->free_mu, NULL);
     pthread_cond_init(&s->free_cv, NULL);
-    /* Prepend to per-bin sink list. */
-    s->next = p->bins[bin];
-    p->bins[bin] = s;
+    /* Prepend to per-bin sink list. Locked against other concurrent
+     * registrations on this pfb_t (writer-vs-writer); the atomic
+     * release publish of the new head is what makes this safe against
+     * the sample-pump thread's lock-free reads (emit_to_bin etc. --
+     * see the bins[]/bins_mu doc comment on struct pfb) even while
+     * this pfb_t is already active and being processed. */
+    pthread_mutex_lock(&p->bins_mu);
+    s->next = __atomic_load_n(&p->bins[bin], __ATOMIC_RELAXED);
+    __atomic_store_n(&p->bins[bin], s, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&p->bins_mu);
     return 0;
 }
 
@@ -600,7 +618,7 @@ static inline void flush_sink(bin_sink_t *s)
 
 static inline void emit_to_bin(pfb_t *p, int bin, float complex y)
 {
-    bin_sink_t *s = p->bins[bin];
+    bin_sink_t *s = __atomic_load_n(&p->bins[bin], __ATOMIC_ACQUIRE);
     while (s) {
         s->active[s->outbuf_count++] = y;
         if (s->outbuf_count == PFB_OUTBUF_SAMPLES) flush_sink(s);
@@ -648,7 +666,7 @@ static inline void pfb_one_cycle(pfb_t *p)
 
     /* Dispatch each bin to its sinks. */
     for (int b = 0; b < M; ++b) {
-        if (!p->bins[b]) continue;
+        if (!__atomic_load_n(&p->bins[b], __ATOMIC_ACQUIRE)) continue;
         emit_to_bin(p, b, (float complex)p->fft_out[b]);
     }
     p->cycle++;
@@ -695,7 +713,7 @@ static inline void pfb_cycle_os(pfb_t *p)
 
     int shift = (int)(((block_start % M) + M) % M);
     for (int b = 0; b < M; ++b) {
-        if (!p->bins[b]) continue;
+        if (!__atomic_load_n(&p->bins[b], __ATOMIC_ACQUIRE)) continue;
         float complex y = (float complex)p->fft_out[b];
         if (shift != 0) {
             /* Forward-FFT phase compensation: at cycle c with block_start=c*R
@@ -758,7 +776,7 @@ void pfb_process(pfb_t *p, const float complex *samples, size_t n)
                 float mag = cabsf(p->nco_current);
                 if (mag > 0.0f) p->nco_current /= mag;
             }
-            if (p->bins[0]) emit_to_bin(p, 0, x);
+            if (__atomic_load_n(&p->bins[0], __ATOMIC_ACQUIRE)) emit_to_bin(p, 0, x);
             ++p->cycle;
         }
         return;
@@ -797,7 +815,7 @@ void pfb_flush(pfb_t *p)
     if (!p) return;
     /* 1. Submit any partial active buffers. */
     for (int b = 0; b < p->M; ++b) {
-        bin_sink_t *s = p->bins[b];
+        bin_sink_t *s = __atomic_load_n(&p->bins[b], __ATOMIC_ACQUIRE);
         while (s) { flush_sink(s); s = s->next; }
     }
     /* 2. Wait for every in-flight work item belonging to this pfb to
@@ -818,7 +836,7 @@ void pfb_destroy(pfb_t *p)
      * dereference bin_sink_t in their return path. */
     pfb_flush(p);
     for (int b = 0; b < p->M; ++b) {
-        bin_sink_t *s = p->bins[b];
+        bin_sink_t *s = __atomic_load_n(&p->bins[b], __ATOMIC_ACQUIRE);
         while (s) {
             bin_sink_t *next = s->next;
             for (int i = 0; i < SINK_RING_N; ++i) free(s->bufs[i]);
@@ -840,6 +858,7 @@ void pfb_destroy(pfb_t *p)
     free(p->h_p);
     free(p->hist);
     pthread_mutex_destroy(&p->flush_mu);
+    pthread_mutex_destroy(&p->bins_mu);
     pthread_cond_destroy(&p->flush_cv);
     free(p);
 

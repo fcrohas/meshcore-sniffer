@@ -31,6 +31,7 @@
 
 #include <complex.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,27 @@ struct channelizer {
     uint32_t        samp_rate;
     int             n_channels;
     chan_state_t   *channels[CHANNELIZER_MAX_CHANNELS];
+    /* n_groups/groups[] follow the SAME release/acquire discipline as
+     * n_channels/channels[] above: find_or_create_group() (called only
+     * from channelizer_add_channel(), which can run at any time via
+     * app_add_runtime_extra_freq() -- the dashboard/C2 "promote"
+     * button -- on a thread OTHER than the sample-pump thread that's
+     * concurrently inside channelizer_process_int8/_float, iterating
+     * groups[0..n_groups)) fully constructs a new pfb_group_t (incl.
+     * pfb_create_os(), which can take real time: FFTW planning, heap
+     * allocation) BEFORE publishing the bumped count with
+     * __ATOMIC_RELEASE; readers use __ATOMIC_ACQUIRE. add_mu
+     * serialises concurrent *writers* against each other (e.g. two
+     * near-simultaneous promotions) -- readers stay lock-free. Without
+     * this, a reader could observe the bumped n_groups while the new
+     * group's .pfb is still NULL/mid-construction: this was a real,
+     * unguarded data race (confirmed by reading the code, not just
+     * inferred from symptoms) matching the "cluster2 real-RF decodes
+     * 1-2 of 4 expected packets nondeterministically" report that
+     * motivated main.c's MESHTASTIC_SINK_WORKERS=1 workaround for the
+     * os>1 PFB path -- that workaround narrows the race's window but
+     * doesn't fix it, and the race isn't actually os_factor-specific. */
+    pthread_mutex_t add_mu;
     int             n_groups;
     pfb_group_t     groups[MAX_PFB_GROUPS];
     /* Shared cs8->cf32 workbuf for the int8 input path. NOT thread-local
@@ -101,7 +123,20 @@ static void pfb_emit_adapter(int channel_id, const float complex *iq,
 /* Find an existing PFB group for this (BW, os_factor) combo, or create
  * one. On creation the pre-shift is set so that the just-added channel
  * lands on bin 0; subsequent channels in the same group fall on their
- * integer-bin offset from there. */
+ * integer-bin offset from there.
+ *
+ * Caller (channelizer_add_channel) must hold c->add_mu -- this
+ * serialises this function against itself (two concurrent callers
+ * would otherwise both do a plain c->n_groups++ and stomp the same
+ * slot) but NOT against channelizer_process_int8/_float, which reads
+ * n_groups/groups[] lock-free via acquire loads. To keep that
+ * reader-side contract sound, n_groups is only bumped (with a
+ * release store) as the LAST step below, after the new pfb_group_t
+ * -- including the potentially slow pfb_create_os() (FFTW planning,
+ * heap allocation) -- is fully built. A reader that observes the
+ * bumped count is guaranteed to also observe the fully-constructed
+ * group, exactly mirroring the n_channels/channels[] pattern in
+ * channelizer_add_channel() below. */
 static int find_or_create_group(channelizer_t *c, int bw_hz, int os_factor,
                                 double first_channel_hz)
 {
@@ -128,7 +163,11 @@ static int find_or_create_group(channelizer_t *c, int bw_hz, int os_factor,
         return -1;
     }
 
-    int gidx = c->n_groups++;
+    /* Reserve the slot index but do NOT publish it via n_groups yet --
+     * grp is being mutated in place below (memset, then field-by-field
+     * construction) and a concurrent lock-free reader must never see
+     * that in-progress state. */
+    int gidx = c->n_groups;
     pfb_group_t *grp = &c->groups[gidx];
     memset(grp, 0, sizeof(*grp));
     grp->active = 1;
@@ -144,7 +183,8 @@ static int find_or_create_group(channelizer_t *c, int bw_hz, int os_factor,
     grp->pfb = pfb_create_os(M, PFB_TAPS_PER_BR, pre_shift,
                              (double)c->samp_rate, os_factor);
     if (!grp->pfb) {
-        --c->n_groups;
+        /* n_groups was never bumped, so nothing to unwind -- this slot
+         * simply gets reused (memset again) by the next attempt. */
         return -1;
     }
     if (verbose) {
@@ -154,6 +194,9 @@ static int find_or_create_group(channelizer_t *c, int bw_hz, int os_factor,
                 gidx, bw_hz / 1000, M, os_factor, grp->bin_0_freq / 1e6,
                 pre_shift, pfb_output_rate(grp->pfb) / 1e3 * os_factor);
     }
+    /* Publish LAST: release-store pairs with channelizer_process_*'s
+     * acquire-load of n_groups. */
+    __atomic_store_n(&c->n_groups, gidx + 1, __ATOMIC_RELEASE);
     return gidx;
 }
 
@@ -163,6 +206,7 @@ channelizer_t *channelizer_create(uint64_t f_center, uint32_t samp_rate)
     if (!c) return NULL;
     c->f_center  = f_center;
     c->samp_rate = samp_rate;
+    pthread_mutex_init(&c->add_mu, NULL);
     return c;
 }
 
@@ -173,12 +217,22 @@ int channelizer_add_channel(channelizer_t *c, const channel_cfg_t *cfg)
     if (cfg->bw_hz <= 0 || c->samp_rate == 0) return -1;
     if ((uint32_t)cfg->bw_hz > c->samp_rate) return -1;
 
+    /* Everything from here on mutates n_groups/groups[] and
+     * n_channels/channels[] -- serialise against any other concurrent
+     * caller of channelizer_add_channel (e.g. two near-simultaneous
+     * app_add_runtime_extra_freq() promotions). The sample-pump
+     * thread's channelizer_process_int8/_float never takes this lock
+     * (see the add_mu doc comment on struct channelizer) -- it stays
+     * lock-free via the acquire loads that pair with the release
+     * stores below. */
+    pthread_mutex_lock(&c->add_mu);
+
     int os = cfg->os_factor > 0 ? cfg->os_factor : 1;
     /* Honor cfg->os_factor: the PFB group oversamples each channel by os
      * (output rate = os*bw_hz) while keeping the channel bw_hz wide. The
      * decoder is created at the matching os_factor by the caller. */
     int gidx = find_or_create_group(c, cfg->bw_hz, os, (double)cfg->f_hz);
-    if (gidx < 0) return -1;
+    if (gidx < 0) { pthread_mutex_unlock(&c->add_mu); return -1; }
     pfb_group_t *grp = &c->groups[gidx];
     int M = pfb_M(grp->pfb);
 
@@ -202,12 +256,17 @@ int channelizer_add_channel(channelizer_t *c, const channel_cfg_t *cfg)
         if (verbose)
             fprintf(stderr, "channelizer: channel %.3f MHz outside Nyquist window\n",
                     (double)cfg->f_hz / 1e6);
+        pthread_mutex_unlock(&c->add_mu);
         return -1;
     }
 
+    if (c->n_channels >= CHANNELIZER_MAX_CHANNELS) {
+        pthread_mutex_unlock(&c->add_mu);
+        return -1;
+    }
     int slot = c->n_channels;
     chan_state_t *s = calloc(1, sizeof(*s));
-    if (!s) return -1;
+    if (!s) { pthread_mutex_unlock(&c->add_mu); return -1; }
     s->id = slot;
     s->cfg = *cfg;
     s->group_idx = gidx;
@@ -215,6 +274,7 @@ int channelizer_add_channel(channelizer_t *c, const channel_cfg_t *cfg)
 
     if (pfb_register_bin(grp->pfb, bin, slot, pfb_emit_adapter, s) < 0) {
         free(s);
+        pthread_mutex_unlock(&c->add_mu);
         return -1;
     }
 
@@ -232,12 +292,13 @@ int channelizer_add_channel(channelizer_t *c, const channel_cfg_t *cfg)
                 slot, (double)cfg->f_hz / 1e6, cfg->bw_hz / 1000, gidx, bin,
                 cfg->sf, cfg->cr);
     }
+    pthread_mutex_unlock(&c->add_mu);
     return slot;
 }
 
 int channelizer_num_channels(const channelizer_t *c)
 {
-    return c ? c->n_channels : 0;
+    return c ? __atomic_load_n(&c->n_channels, __ATOMIC_ACQUIRE) : 0;
 }
 
 /* Channelizer OMP fanout switch. Evaluated once via the env var
@@ -270,7 +331,7 @@ void channelizer_process_int8(channelizer_t *c, const int8_t *iq, size_t n)
     }
     /* Run each PFB group in its own thread. Groups have independent
      * state (separate pfb_t instances). */
-    int n_groups = c->n_groups;
+    int n_groups = __atomic_load_n(&c->n_groups, __ATOMIC_ACQUIRE);
     float complex *wb = c->workbuf;
 #if defined(_OPENMP)
     if (channelizer_omp_enabled()) {
@@ -289,7 +350,7 @@ void channelizer_process_int8(channelizer_t *c, const int8_t *iq, size_t n)
 void channelizer_process_float(channelizer_t *c, const float complex *iq, size_t n)
 {
     if (!c || n == 0) return;
-    int n_groups = c->n_groups;
+    int n_groups = __atomic_load_n(&c->n_groups, __ATOMIC_ACQUIRE);
 #if defined(_OPENMP)
     if (channelizer_omp_enabled()) {
         /* Cap threads to actual parallel work. With ~3 BWs (= 3 PFB groups
@@ -310,7 +371,7 @@ void channelizer_process_float(channelizer_t *c, const float complex *iq, size_t
 void channelizer_flush(channelizer_t *c)
 {
     if (!c) return;
-    for (int g = 0; g < c->n_groups; ++g) {
+    for (int g = 0; g < __atomic_load_n(&c->n_groups, __ATOMIC_ACQUIRE); ++g) {
         if (c->groups[g].active)
             pfb_flush(c->groups[g].pfb);
     }
@@ -328,6 +389,7 @@ void channelizer_destroy(channelizer_t *c)
     for (int i = 0; i < c->n_channels; ++i) {
         if (c->channels[i]) free(c->channels[i]);
     }
+    pthread_mutex_destroy(&c->add_mu);
     free(c->workbuf);
     free(c);
 }
