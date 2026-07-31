@@ -977,6 +977,39 @@ char *db_sqlite_query_channel_names_json(void)
     return buf;
 }
 
+size_t db_sqlite_query_known_channel_names(char out[][40], size_t max_out)
+{
+    if (!g_db || max_out == 0) return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    /* GROUP BY (channel_hash, channel_name), not channel_hash alone --
+     * see db_sqlite_query_channel_names_json()'s doc comment. Grouping
+     * by hash alone here was worse than a display bug: on every
+     * restart it silently restored the key for only ONE of two
+     * colliding channels (whichever was most recently active),
+     * leaving the other undecryptable again until the background
+     * dictionary attack rediscovered it from scratch. */
+    static const char *SQL =
+        "SELECT channel_name, MAX(ts) FROM events "
+        "WHERE protocol='meshcore' AND channel_hash IS NOT NULL "
+        "AND channel_name IS NOT NULL AND channel_name != '' "
+        "GROUP BY channel_hash, channel_name";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: known-channel-names query failed: %s\n", sqlite3_errmsg(g_db));
+        return 0;
+    }
+
+    size_t n = 0;
+    while (n < max_out && sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char *cname = sqlite3_column_text(stmt, 0);
+        if (!cname || !*cname) continue;
+        snprintf(out[n], 40, "%s", (const char *)cname);
+        ++n;
+    }
+    sqlite3_finalize(stmt);
+    return n;
+}
+
 db_sqlite_undecrypted_row_t *db_sqlite_query_undecrypted_channel_rows(uint8_t channel_hash, size_t *out_n)
 {
     if (out_n) *out_n = 0;

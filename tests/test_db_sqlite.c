@@ -83,6 +83,7 @@ static void test_meshcore_row(void)
     ev.has_crc = true;
     ev.payload_crc_ok = true;
     ev.crc_corrected = true;
+    ev.crc_corrected_bits = 1;
     ev.rssi_db = -80.0f;
     ev.snr_db = 6.5f;
     ev.sf = 11; ev.cr = 5; ev.bw_hz = 250000;
@@ -118,7 +119,7 @@ static void test_meshcore_row(void)
 
     sqlite3_stmt *stmt;
     CHECK(sqlite3_prepare_v2(db,
-        "SELECT protocol, type, decrypted, crc_ok, crc_corrected, node_id, "
+        "SELECT protocol, type, decrypted, crc_ok, crc_corrected, crc_corrected_bits, node_id, "
         "channel_name, channel_hash, text, raw_hex, json FROM events WHERE protocol='meshcore'",
         -1, &stmt, NULL) == SQLITE_OK, "prepare select for the meshcore row");
     CHECK(sqlite3_step(stmt) == SQLITE_ROW, "meshcore row is present");
@@ -127,13 +128,14 @@ static void test_meshcore_row(void)
     CHECK(sqlite3_column_int(stmt, 2) == 1, "decrypted == 1");
     CHECK(sqlite3_column_int(stmt, 3) == 1, "crc_ok == 1");
     CHECK(sqlite3_column_int(stmt, 4) == 1, "crc_corrected == 1 (bruteforce-recovered frame)");
-    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 5), "!8000000e") == 0,
+    CHECK(sqlite3_column_int(stmt, 5) == 1, "crc_corrected_bits == 1 (single-bit recovery)");
+    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 6), "!8000000e") == 0,
           "node_id == '!8000000e' (GRP_TXT keys off channel_hash 0x0e, tagged with bit 31)");
-    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 6), "Public") == 0, "channel_name == 'Public'");
-    CHECK(sqlite3_column_int(stmt, 7) == 0x0e, "channel_hash == 0x0e");
-    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 8), "hello from a test") == 0, "text matches mc_text");
-    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 9), "deadbeef") == 0, "raw_hex matches");
-    CHECK(strstr((const char *)sqlite3_column_text(stmt, 10), "GRP_TXT") != NULL, "json column holds the full serialized event");
+    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 7), "Public") == 0, "channel_name == 'Public'");
+    CHECK(sqlite3_column_int(stmt, 8) == 0x0e, "channel_hash == 0x0e");
+    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 9), "hello from a test") == 0, "text matches mc_text");
+    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 10), "deadbeef") == 0, "raw_hex matches");
+    CHECK(strstr((const char *)sqlite3_column_text(stmt, 11), "GRP_TXT") != NULL, "json column holds the full serialized event");
     sqlite3_finalize(stmt);
 
     sqlite3_stmt *stmt2;
@@ -304,6 +306,75 @@ static void test_query_messages_json(void)
     reset_db_file();
 }
 
+/* Publishes an ADVERT-typed row so bind_node_id()/mc_node_id() derives
+ * a real, non-null node_id ("!aabbccdd"-style) from the pubkey prefix
+ * -- publish_chat() above leaves mc_payload_type at its zeroed default,
+ * which mc_node_id() doesn't recognize, so those rows never get a
+ * node_id and can't be used to test the by-node-id query. */
+static void publish_advert(uint8_t pk0, uint8_t pk1, uint8_t pk2, uint8_t pk3, const char *json)
+{
+    mesh_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = true;
+    ev.decrypted = true;
+    ev.mc_payload_type = 4; /* MC_PAYLOAD_ADVERT */
+    ev.mc_pubkey[0] = pk0; ev.mc_pubkey[1] = pk1; ev.mc_pubkey[2] = pk2; ev.mc_pubkey[3] = pk3;
+    db_sqlite_publish(&ev, json, strlen(json));
+}
+
+/* db_sqlite_query_node_events_json() backs the repeater/node drawer's
+ * history hydration (GET /api/node-history) -- same paging contract
+ * as db_sqlite_query_messages_json() above, just scoped by node_id
+ * instead of channel_hash, so mirror that test's shape. */
+static void test_query_node_events_json(void)
+{
+    reset_db_file();
+    CHECK(db_sqlite_init(TEST_DB_PATH), "db_sqlite_init succeeds for node-events-query test");
+
+    publish_advert(0xaa, 0xbb, 0xcc, 0xdd, "{\"seq\":0}");
+    usleep(2000);
+    double t_after_0 = now_secs();
+    usleep(2000);
+    publish_advert(0xaa, 0xbb, 0xcc, 0xdd, "{\"seq\":1}");
+    usleep(2000);
+    publish_advert(0xaa, 0xbb, 0xcc, 0xdd, "{\"seq\":2}");
+    usleep(2000);
+    /* Different node -- must never leak into !aabbccdd's results. */
+    publish_advert(0x11, 0x22, 0x33, 0x44, "{\"seq\":99}");
+
+    char *missing = db_sqlite_query_node_events_json(NULL, 0.0, 5);
+    CHECK(missing == NULL, "NULL node_id returns NULL, not a malformed query");
+    char *empty_id = db_sqlite_query_node_events_json("", 0.0, 5);
+    CHECK(empty_id == NULL, "empty node_id returns NULL");
+
+    char *newest = db_sqlite_query_node_events_json("!aabbccdd", 0.0, 2);
+    CHECK(newest != NULL, "query with no before bound returns non-NULL");
+    CHECK(strstr(newest, "\"seq\":2") != NULL, "newest page (limit 2) contains seq 2");
+    CHECK(strstr(newest, "\"seq\":1") != NULL, "newest page (limit 2) contains seq 1");
+    CHECK(strstr(newest, "\"seq\":0") == NULL, "newest page (limit 2) excludes seq 0");
+    CHECK(strstr(newest, "\"seq\":99") == NULL, "newest page never leaks a different node's row");
+    CHECK(strstr(newest, "\"more\":true") != NULL, "newest page reports more:true (seq 0 remains)");
+    free(newest);
+
+    /* t_after_0 was captured strictly between seq 0 and seq 1, so only
+     * seq 0 should satisfy ts < t_after_0. */
+    char *older = db_sqlite_query_node_events_json("!aabbccdd", t_after_0, 5);
+    CHECK(older != NULL, "before=t_after_0 query returns non-NULL");
+    CHECK(strstr(older, "\"seq\":0") != NULL, "before=t_after_0 page contains seq 0");
+    CHECK(strstr(older, "\"seq\":1") == NULL, "before=t_after_0 page excludes seq 1 (published after cutoff)");
+    CHECK(strstr(older, "\"more\":false") != NULL, "before=t_after_0 page reports more:false (only seq 0 matches)");
+    free(older);
+
+    char *other_node = db_sqlite_query_node_events_json("!00000001", 0.0, 5);
+    CHECK(other_node != NULL, "query for a node with zero rows still returns non-NULL");
+    CHECK(strstr(other_node, "\"events\":[]") != NULL, "node with no rows returns an empty events array");
+    CHECK(strstr(other_node, "\"more\":false") != NULL, "empty result reports more:false");
+    free(other_node);
+
+    db_sqlite_shutdown();
+    reset_db_file();
+}
+
 static void publish_meshcore_typed(const char *type_name)
 {
     mesh_event_t ev;
@@ -325,6 +396,51 @@ static void publish_meshcore_channel(uint32_t channel_hash, const char *channel_
     if (channel_name) strncpy(ev.channel_name, channel_name, sizeof(ev.channel_name) - 1);
     const char *json = "{}";
     db_sqlite_publish(&ev, json, strlen(json));
+}
+
+/* db_sqlite_query_known_channel_names() backs main.c's cross-restart
+ * MeshCore channel-key recovery (see its doc comment in db_sqlite.h):
+ * without it, a channel already cracked in a previous session decrypts
+ * nothing until fresh traffic happens to re-trigger discovery. Must
+ * return exactly one (the most recent) name per distinct channel_hash,
+ * skip hashes that were only ever seen undecrypted (channel_name NULL),
+ * and never include an empty string. */
+static void test_query_known_channel_names(void)
+{
+    reset_db_file();
+    CHECK(db_sqlite_init(TEST_DB_PATH), "db_sqlite_init succeeds for known-channel-names test");
+
+    publish_meshcore_channel(1, "Public");
+    publish_meshcore_channel(3, "fr-48");
+    usleep(2000);
+    publish_meshcore_channel(3, "fr-48"); /* same hash+name again -- must not duplicate */
+    /* Never-named hash -- every message on it arrived undecrypted. */
+    publish_meshcore_channel(9, NULL);
+
+    char names[8][40];
+    size_t n = db_sqlite_query_known_channel_names(names, 8);
+    CHECK(n == 2, "known channel names: exactly 2 distinct named hashes (1 and 3), not 3");
+
+    bool have_public = false, have_fr48 = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (!strcmp(names[i], "Public")) have_public = true;
+        if (!strcmp(names[i], "fr-48")) have_fr48 = true;
+    }
+    CHECK(have_public, "known channel names: includes 'Public'");
+    CHECK(have_fr48, "known channel names: includes 'fr-48', not duplicated despite 2 rows");
+
+    char tiny[1][40];
+    size_t capped = db_sqlite_query_known_channel_names(tiny, 1);
+    CHECK(capped == 1, "known channel names: respects a max_out smaller than the result set");
+
+    db_sqlite_shutdown();
+    reset_db_file();
+
+    CHECK(db_sqlite_init(TEST_DB_PATH), "db_sqlite_init succeeds for empty known-channel-names test");
+    size_t empty = db_sqlite_query_known_channel_names(names, 8);
+    CHECK(empty == 0, "known channel names: a DB with no named channels returns 0, not garbage");
+    db_sqlite_shutdown();
+    reset_db_file();
 }
 
 static void publish_meshcore_crc(bool has_crc, bool crc_ok, bool crc_corrected)
@@ -438,6 +554,8 @@ int main(void)
     test_meshcore_row();
     test_node_reload_and_event_replay();
     test_query_messages_json();
+    test_query_node_events_json();
+    test_query_known_channel_names();
     test_query_stats_json();
 
     if (failures) {

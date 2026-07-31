@@ -195,6 +195,37 @@ char *db_sqlite_query_stats_crc_json(double since_ts);
  * NULL only if db_sqlite_init() was never called/failed. */
 char *db_sqlite_query_channel_names_json(void);
 
+/* Cross-restart recovery for MeshCore channel *keys* (not just
+ * display names): the live channelset (g_meshcore_channels, main.c)
+ * is in-memory only -- every channel the background hashtag
+ * dictionary attack ever cracked, or the operator added via the
+ * dashboard, has to be rediscovered/re-added from scratch after every
+ * restart. For hashtag-derived channels that's a silent, possibly
+ * hours-long gap (until fresh traffic on that exact channel_hash
+ * happens to arrive and re-trigger discovery) where messages that
+ * decrypted fine yesterday show as undecrypted today, even though the
+ * DB already knows the channel's name -- and the secret is fully
+ * re-derivable from that name alone (see
+ * meshcore_channelset_add_hashtag()), no bruteforce needed.
+ *
+ * Returns the most recent channel_name ever recorded for each
+ * distinct MeshCore channel_hash (same distinct-hash grouping as
+ * db_sqlite_query_channel_names_json(), just as plain C strings for
+ * direct reuse by main.c instead of a JSON blob for the frontend).
+ * Every stored name -- including "Public" and any '#'-prefixed
+ * hashtag display name -- is safe to feed straight into
+ * meshcore_channelset_add_hashtag(), which already special-cases
+ * "Public" and strips/re-adds the leading '#' itself. A name that was
+ * actually a PRIVATE (non-hashtag) channel just fails to re-derive
+ * the right secret silently -- no different from not having an entry
+ * at all, and bounded by MC_CHANNEL_MAX_ENTRIES like any other add.
+ *
+ * Writes up to max_out entries into out (each up to 39 chars + NUL,
+ * comfortably covering MC_CHANNEL_MAX_NAME in meshcore.h) and returns
+ * the count written. Returns 0 if db_sqlite_init() wasn't called/
+ * failed, or nothing matches. */
+size_t db_sqlite_query_known_channel_names(char out[][40], size_t max_out);
+
 /* Retroactive re-decrypt support (see meshcore_redecrypt.c): a channel
  * whose secret becomes known *after* some of its traffic was already
  * captured -- via a manual dashboard add or the background hashtag-

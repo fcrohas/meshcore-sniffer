@@ -3903,6 +3903,41 @@ static int run_live(void)
         db_sqlite_load_nodes();
         if (opt_web_port > 0 && opt_history_replay_hours > 0)
             db_sqlite_replay_recent(opt_history_replay_hours);
+
+        /* Cross-restart recovery for MeshCore channel *keys*: without
+         * this, every hashtag channel the background dictionary
+         * attack (or an operator) ever cracked has to be silently
+         * rediscovered from scratch after each restart -- a gap
+         * (until fresh traffic on that exact channel_hash happens to
+         * arrive) where messages the DB already knows how to decrypt
+         * show up as undecrypted, even though the secret is fully
+         * re-derivable from the name alone. See
+         * db_sqlite_query_known_channel_names() for the full
+         * rationale and the (small, bounded) risk for a name that was
+         * actually a private, non-hashtag channel.
+         *
+         * Restoring the key alone only fixes *future* traffic on that
+         * channel -- any row already stuck in the DB as undecrypted
+         * from before this restart (e.g. captured in a window where a
+         * previous run hadn't rediscovered the channel yet) stays
+         * that way forever unless something retries it now that the
+         * key is back. meshcore_redecrypt_channel() is exactly that
+         * retry (same one c2.c's manual channel-add API path already
+         * uses) -- run it for every restored hash so this startup
+         * pass is a complete fix, not just a partial one. */
+        if (g_meshcore_channels) {
+            char names[MC_CHANNEL_MAX_ENTRIES][40];
+            size_t nn = db_sqlite_query_known_channel_names(names, MC_CHANNEL_MAX_ENTRIES);
+            int total_fixed = 0;
+            for (size_t i = 0; i < nn; ++i) {
+                uint8_t hash = 0;
+                if (meshcore_channelset_add_hashtag(g_meshcore_channels, names[i], &hash, NULL) == 0)
+                    total_fixed += meshcore_redecrypt_channel(hash, g_meshcore_channels);
+            }
+            if (nn > 0)
+                fprintf(stderr, "db_sqlite: restored %zu known MeshCore channel key(s) from history, "
+                                "retroactively decrypted %d already-stored row(s)\n", nn, total_fixed);
+        }
     }
     if (opt_geofence_file) geofence_init(opt_geofence_file);
     if (opt_psk_wordlist) {

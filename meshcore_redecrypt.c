@@ -20,6 +20,7 @@
 #include "jw.h"
 #include "meshcore_decoders.h"
 #include "meshcore_packet.h"
+#include "meshcore_region_dict.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +90,17 @@ int meshcore_redecrypt_channel(uint8_t channel_hash, const meshcore_channelset_t
         ev.mc_hdr_path_len = pkt.path_len < sizeof(ev.mc_hdr_path)
                             ? (int)pkt.path_len : (int)sizeof(ev.mc_hdr_path);
         memcpy(ev.mc_hdr_path, pkt.path, (size_t)ev.mc_hdr_path_len);
+        ev.mc_has_region_scope = pkt.has_transport_codes;
+        if (pkt.has_transport_codes) {
+            ev.mc_region_code1 = pkt.transport_code1;
+            ev.mc_region_code2 = pkt.transport_code2;
+            /* Fast-only here too -- this can run over many rows in a
+             * burst when a channel is newly cracked; see
+             * meshcore_region_dict.h. */
+            if (!meshcore_region_resolve_fast(pkt.payload_type, pkt.payload, pkt.payload_len,
+                                              pkt.transport_code1, ev.mc_region_name, sizeof(ev.mc_region_name)))
+                meshcore_region_dict_enqueue(pkt.payload_type, pkt.payload, pkt.payload_len, pkt.transport_code1);
+        }
         snprintf(ev.raw_hex, sizeof(ev.raw_hex), "%s", rows[i].raw_hex);
 
         bool ok = (pkt.payload_type == MC_PAYLOAD_GRP_TXT)
