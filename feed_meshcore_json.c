@@ -158,11 +158,15 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
     /* has_crc/payload_crc_ok mirror the Meshtastic path's fields (see
      * serialize_event() in feed.c); crc_corrected additionally flags a
      * frame recovered via lora_crc_bruteforce_correct()'s single-bit
-     * search rather than a clean first-pass CRC match. */
+     * search or the two-bit fallback (crc_corrected_bits==2 only ever
+     * reaches here after main.c's on_mesh_event has confirmed
+     * independent authentication -- mesh_event_crc2bit_trusted()). */
     if (ev->has_crc) {
         jw_field_bool(j, "payload_crc_ok", ev->payload_crc_ok);
-        if (ev->payload_crc_ok && ev->crc_corrected)
+        if (ev->payload_crc_ok && ev->crc_corrected) {
             jw_field_bool(j, "crc_corrected", true);
+            jw_field_u32(j, "crc_corrected_bits", (uint32_t)ev->crc_corrected_bits);
+        }
     }
     if (ev->sf > 0) {
         jw_field_u32(j, "sf",    (uint32_t)ev->sf);
@@ -223,6 +227,11 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
     if (ev->mc_payload_type == MC_PAYLOAD_GRP_DATA && ev->decrypted) {
         jw_field_u32(j, "data_type", (uint32_t)ev->mc_data_type);
         jw_field_u32(j, "data_len",  (uint32_t)ev->mc_data_len);
+        /* Best-effort CayenneLPP decode of the blob (meshcore_lpp.c),
+         * "" when it didn't parse as valid LPP -- see mc_telemetry_json's
+         * doc comment in mesh_packet.h. Embedded raw (not string-
+         * escaped): it's already a JSON array. */
+        jw_field_raw(j, "telemetry", ev->mc_telemetry_json);
     }
 
     jw_close(j);

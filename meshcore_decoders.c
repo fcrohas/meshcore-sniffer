@@ -7,6 +7,8 @@
 
 #include "meshcore_decoders.h"
 #include "meshcore_hashtag_dict.h"
+#include "meshcore_lpp.h"
+#include "meshcore_region_dict.h"
 
 #include <ctype.h>
 #include <openssl/evp.h>
@@ -343,13 +345,20 @@ bool meshcore_decode_grp_data(const meshcore_packet_t *pkt,
         ev->mc_data_type = data_type;
         ev->mc_data_len  = data_len;
 
-        switch (data_type) {
-        /* TODO: ajouter des décodeurs spécifiques quand la doc
-         * MeshCore des data_type sera confirmée (ex: position,
-         * telemetry...). */
-        default:
+        /* data_type is app-defined (see MeshCore's docs/
+         * number_allocations.md) and not authoritative -- try a
+         * best-effort CayenneLPP decode of the blob regardless of its
+         * value; meshcore_lpp_decode() only reports success on a
+         * clean, fully-consumed record run, so this doesn't
+         * false-positive on non-telemetry app data. Falls back to the
+         * hex dump when it doesn't parse as LPP. */
+        meshcore_lpp_record_t lpp_recs[MESHCORE_LPP_MAX_RECORDS];
+        int n_lpp = meshcore_lpp_decode(plain + 3, n, lpp_recs, MESHCORE_LPP_MAX_RECORDS);
+        if (n_lpp > 0) {
+            meshcore_lpp_to_json(lpp_recs, n_lpp, ev->mc_telemetry_json, sizeof(ev->mc_telemetry_json));
+            meshcore_lpp_to_text(lpp_recs, n_lpp, ev->mc_text, sizeof(ev->mc_text));
+        } else {
             hex_dump(plain + 3, n, ev->mc_text, sizeof(ev->mc_text));
-            break;
         }
     }
     strncpy(ev->channel_name, channels->entries[chan_idx].name, sizeof(ev->channel_name) - 1);

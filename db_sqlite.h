@@ -80,6 +80,55 @@ bool db_sqlite_replay_recent(double hours);
  * returns a valid {"messages":[],"more":false}, not NULL. */
 char *db_sqlite_query_messages_json(uint32_t channel_hash, double before_ts, int limit);
 
+/* On-demand per-node history for the repeater/node drawer, same
+ * rationale as db_sqlite_query_messages_json() above: the frontend's
+ * nodes[id]._hist (messages/positions/SNR/channels-seen) is built
+ * only from live SSE traffic in memory, capped and reset on every
+ * reconnect/reload -- clicking an older or quiet repeater otherwise
+ * shows a near-empty drawer even though the DB has plenty of history.
+ * Queries the `events` table directly by node_id (see bind_node_id()
+ * in this file), newest first.
+ *
+ * before_ts <= 0 means "no upper bound" (start from the newest row);
+ * otherwise only rows with ts < before_ts are returned. limit is
+ * clamped by the caller; this function trusts its argument.
+ *
+ * Returns a malloc'd, NUL-terminated JSON string of the form
+ *   {"events":[<json>,...],"more":bool}
+ * where each array element is the verbatim stored `json` column value
+ * (same shape as an SSE event line) -- the caller builds the drawer's
+ * msgs/positions/snr/channels rings from these the same way it
+ * already processes live events, just in bulk. Caller must free()
+ * the result.
+ *
+ * Returns NULL if db_sqlite_init() was never called/failed, or on a
+ * genuine DB/allocation error. A node_id with zero matching rows
+ * still returns a valid {"events":[],"more":false}, not NULL. */
+char *db_sqlite_query_node_events_json(const char *node_id, double before_ts, int limit);
+
+/* On-demand telemetry history for the Telemetry tab, same paging
+ * shape as db_sqlite_query_messages_json()/_node_events_json() above.
+ * Queries the `events` table for rows with telemetry_json IS NOT NULL
+ * (GRP_DATA frames whose blob decoded as CayenneLPP -- see
+ * meshcore_lpp.c), newest first. MeshCore GRP_TXT/GRP_DATA carries no
+ * sender identity (see feed_meshcore_json.c's own comment on this),
+ * so there is no node_id filter here -- only channel-scoped and
+ * global views make sense.
+ *
+ * before_ts <= 0 means "no upper bound"; limit is clamped by the
+ * caller.
+ *
+ * Returns a malloc'd, NUL-terminated JSON string of the form
+ *   {"telemetry":[<json>,...],"more":bool}
+ * where each array element is the verbatim stored `json` column value
+ * (same shape as an SSE event line, including its own "telemetry"
+ * field -- see feed_meshcore_json.c). Caller must free() the result.
+ *
+ * Returns NULL if db_sqlite_init() was never called/failed, or on a
+ * genuine DB/allocation error. Zero matching rows still returns a
+ * valid {"telemetry":[],"more":false}, not NULL. */
+char *db_sqlite_query_telemetry_json(double before_ts, int limit);
+
 /* Dashboard bootstrap-on-load, so a browser tab opened after a sniffer
  * restart isn't blank -- node_db (and the frontend's live-traffic-only
  * `nodes`/`markers` state) never persists to disk on their own, but the

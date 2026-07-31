@@ -168,6 +168,14 @@ typedef struct mesh_event {
     uint16_t mc_data_type;       /* GRP_DATA: data_type field (u16 LE) */
     uint16_t mc_data_len;        /* GRP_DATA: data_len field (u8 on the wire, widened here) */
     uint8_t  mc_txt_type;        /* GRP_TXT: TXT_TYPE_PLAIN(0)/CLI_DATA(1)/SIGNED_PLAIN(2) */
+    /* GRP_DATA: best-effort CayenneLPP decode of the blob (see
+     * meshcore_lpp.h) -- "" when the blob didn't parse as valid LPP
+     * (most GRP_DATA traffic isn't telemetry; mc_text still carries
+     * the hex-dump fallback in that case). JSON array, e.g.
+     * [{"ch":1,"type":103,"name":"temperature","unit":"C","value":23.4}].
+     * MeshCore GRP_DATA carries no sender identity -- only channel_name/
+     * mc_channel_hash attribute this reading to anything. */
+    char     mc_telemetry_json[1024];
 
     /* ADVERT app_data (AdvertDataBuilder/Parser format): flags byte
      * (bits[3:0]=adv_type, bits[7:4]=presence flags) followed by
@@ -180,6 +188,17 @@ typedef struct mesh_event {
     bool     mc_has_name;        /* ADVERT: ADV_NAME_MASK was set */
     uint16_t mc_extra1;          /* ADVERT: ADV_FEAT1_MASK payload, when present */
     uint16_t mc_extra2;          /* ADVERT: ADV_FEAT2_MASK payload, when present */
+
+    /* Region scope (v1.10+ "Region Management" flood-scoping), present
+     * only when mc_route_type is TRANSPORT_FLOOD/TRANSPORT_DIRECT --
+     * see meshcore_packet.h's has_transport_codes. code1 is the
+     * sender's declared scope, code2 a reply-routing hint; both are
+     * opaque HMAC codes unless meshcore_region_resolve_fast()/_full()
+     * matched code1 against a known public region name. */
+    bool     mc_has_region_scope;
+    uint16_t mc_region_code1;
+    uint16_t mc_region_code2;
+    char     mc_region_name[32]; /* resolved name for code1, empty if unresolved */
 } mesh_event_t;
 
 typedef void (*mesh_event_cb_t)(const mesh_event_t *ev, void *user);

@@ -49,6 +49,11 @@ void jw_field_str(jw_t *j, const char *name, const char *value) {
     jw_field_name(j, name);
     jw_str_escaped(j, value);
 }
+void jw_field_raw(jw_t *j, const char *name, const char *raw_json) {
+    if (!raw_json || !raw_json[0]) return;
+    jw_field_name(j, name);
+    jw_puts(j, raw_json);
+}
 void jw_field_u32(jw_t *j, const char *name, uint32_t value) {
     jw_field_name(j, name);
     jw_printf(j, "%u", value);

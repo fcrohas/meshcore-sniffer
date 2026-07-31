@@ -46,6 +46,7 @@ static const char *SCHEMA_SQL =
     "  decrypted INTEGER,"
     "  crc_ok INTEGER,"
     "  crc_corrected INTEGER,"
+    "  crc_corrected_bits INTEGER,"
     "  rssi_db REAL,"
     "  snr_db REAL,"
     "  sf INTEGER,"
@@ -59,11 +60,23 @@ static const char *SCHEMA_SQL =
     "  lat REAL,"
     "  lon REAL,"
     "  raw_hex TEXT,"
-    "  json TEXT"
+    "  json TEXT,"
+    "  telemetry_json TEXT"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);"
     "CREATE INDEX IF NOT EXISTS idx_events_node_id ON events(node_id);"
     "CREATE INDEX IF NOT EXISTS idx_events_channel_ts_chat ON events(channel_hash, ts) WHERE text IS NOT NULL;"
+    /* idx_events_telemetry_ts is NOT created here: on a pre-existing
+     * DB from before telemetry_json existed, CREATE TABLE IF NOT
+     * EXISTS above is a no-op (column still missing) and a partial
+     * index predicate referencing a nonexistent column fails at
+     * CREATE INDEX time -- which aborts this entire multi-statement
+     * exec (sqlite3_exec stops at the first error), so db_sqlite_init()
+     * would fail outright on every upgrade from an older DB. Created
+     * unconditionally, AFTER the ALTER TABLE ADD COLUMN migration
+     * below instead, which guarantees the column exists first (fresh
+     * DBs already have it from the CREATE TABLE column list, so this
+     * is just a harmless IF NOT EXISTS no-op for them). */
     "CREATE TABLE IF NOT EXISTS nodes ("
     "  id INTEGER PRIMARY KEY,"
     "  long_name TEXT NOT NULL DEFAULT '',"
@@ -90,10 +103,10 @@ static const char *NODE_UPSERT_SQL =
 static const char *INSERT_SQL =
     "INSERT INTO events ("
     "  ts, protocol, type, route_type, payload_type, decrypted, crc_ok,"
-    "  crc_corrected, rssi_db, snr_db, sf, cr, bw_hz, node_id,"
+    "  crc_corrected, crc_corrected_bits, rssi_db, snr_db, sf, cr, bw_hz, node_id,"
     "  channel_name, channel_hash, text, route_path_hex, lat, lon,"
-    "  raw_hex, json"
-    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    "  raw_hex, json, telemetry_json"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 /* Same derivation as mc_derive_from_id() in feed_meshcore_json.c
  * (kept independent rather than exported/shared, since this is the
@@ -176,6 +189,25 @@ bool db_sqlite_init(const char *path)
         return false;
     }
 
+    /* Lightweight migration: SCHEMA_SQL's CREATE TABLE IF NOT EXISTS
+     * only lays out the full column set for a brand-new DB file. An
+     * existing DB from before crc_corrected_bits was added won't get
+     * the column added by that statement, so add it explicitly here.
+     * Errors are expected (and ignored) on any DB that already has
+     * the column -- SQLite has no ADD COLUMN IF NOT EXISTS, and this
+     * file has no other versioned-migration mechanism to hook into. */
+    sqlite3_exec(g_db, "ALTER TABLE events ADD COLUMN crc_corrected_bits INTEGER;",
+                 NULL, NULL, &errmsg);
+    if (errmsg) { sqlite3_free(errmsg); errmsg = NULL; }
+    sqlite3_exec(g_db, "ALTER TABLE events ADD COLUMN telemetry_json TEXT;",
+                 NULL, NULL, &errmsg);
+    if (errmsg) { sqlite3_free(errmsg); errmsg = NULL; }
+    sqlite3_exec(g_db,
+                 "CREATE INDEX IF NOT EXISTS idx_events_telemetry_ts "
+                 "ON events(ts) WHERE telemetry_json IS NOT NULL;",
+                 NULL, NULL, &errmsg);
+    if (errmsg) { sqlite3_free(errmsg); errmsg = NULL; }
+
     if (sqlite3_prepare_v2(g_db, INSERT_SQL, -1, &g_insert_stmt, NULL) != SQLITE_OK) {
         fprintf(stderr, "db_sqlite: prepare insert failed: %s\n", sqlite3_errmsg(g_db));
         sqlite3_close(g_db);
@@ -226,6 +258,7 @@ void db_sqlite_publish(const mesh_event_t *ev, const char *json_line, size_t jso
     if (ev->has_crc) sqlite3_bind_int(g_insert_stmt, i++, ev->payload_crc_ok ? 1 : 0);
     else              sqlite3_bind_null(g_insert_stmt, i++);
     sqlite3_bind_int(g_insert_stmt, i++, ev->crc_corrected ? 1 : 0);
+    sqlite3_bind_int(g_insert_stmt, i++, ev->crc_corrected_bits);
 
     if (ev->rssi_db != 0.0f) sqlite3_bind_double(g_insert_stmt, i++, ev->rssi_db);
     else                     sqlite3_bind_null(g_insert_stmt, i++);
@@ -282,6 +315,11 @@ void db_sqlite_publish(const mesh_event_t *ev, const char *json_line, size_t jso
 
     if (json_line && json_len) sqlite3_bind_text(g_insert_stmt, i++, json_line, (int)json_len, SQLITE_TRANSIENT);
     else                        sqlite3_bind_null(g_insert_stmt, i++);
+
+    if (ev->is_meshcore && ev->decrypted && ev->mc_telemetry_json[0])
+        sqlite3_bind_text(g_insert_stmt, i++, ev->mc_telemetry_json, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(g_insert_stmt, i++);
 
     if (sqlite3_step(g_insert_stmt) != SQLITE_DONE) {
         fprintf(stderr, "db_sqlite: insert failed: %s\n", sqlite3_errmsg(g_db));
@@ -427,6 +465,112 @@ char *db_sqlite_query_messages_json(uint32_t channel_hash, double before_ts, int
 
         /* Grow to fit: current length + "," + this row + room for the
          * closing "],\"more\":false}" tail written after the loop. */
+        size_t need = (size_t)n + 1 + (size_t)len + 24;
+        if (need > cap) {
+            size_t newcap = cap * 2;
+            while (newcap < need) newcap *= 2;
+            char *nb = realloc(buf, newcap);
+            if (!nb) { free(buf); sqlite3_finalize(stmt); return NULL; }
+            buf = nb;
+            cap = newcap;
+        }
+        if (!first) buf[n++] = ',';
+        first = false;
+        memcpy(buf + n, txt, (size_t)len);
+        n += len;
+        ++row_count;
+    }
+    sqlite3_finalize(stmt);
+
+    n += snprintf(buf + n, cap - (size_t)n, "],\"more\":%s}", more ? "true" : "false");
+    return buf;
+}
+
+char *db_sqlite_query_node_events_json(const char *node_id, double before_ts, int limit)
+{
+    if (!g_db) return NULL;
+    if (!node_id || !node_id[0]) return NULL;
+    if (limit <= 0) limit = 1;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT json FROM events WHERE node_id = ?1 "
+        "AND (?2 <= 0 OR ts < ?2) ORDER BY ts DESC LIMIT ?3";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: node-events query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+    sqlite3_bind_text(stmt, 1, node_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 2, before_ts);
+    /* Fetch one extra row so "more" can be derived without a second
+     * COUNT(*) query -- if the (limit+1)th row exists, there's more. */
+    sqlite3_bind_int(stmt, 3, limit + 1);
+
+    size_t cap = 256;
+    char *buf = malloc(cap);
+    if (!buf) { sqlite3_finalize(stmt); return NULL; }
+    int n = snprintf(buf, cap, "{\"events\":[");
+
+    int row_count = 0;
+    bool first = true, more = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (row_count >= limit) { more = true; break; }
+        const unsigned char *txt = sqlite3_column_text(stmt, 0);
+        int len = sqlite3_column_bytes(stmt, 0);
+        if (!txt || len <= 0) continue;
+
+        size_t need = (size_t)n + 1 + (size_t)len + 24;
+        if (need > cap) {
+            size_t newcap = cap * 2;
+            while (newcap < need) newcap *= 2;
+            char *nb = realloc(buf, newcap);
+            if (!nb) { free(buf); sqlite3_finalize(stmt); return NULL; }
+            buf = nb;
+            cap = newcap;
+        }
+        if (!first) buf[n++] = ',';
+        first = false;
+        memcpy(buf + n, txt, (size_t)len);
+        n += len;
+        ++row_count;
+    }
+    sqlite3_finalize(stmt);
+
+    n += snprintf(buf + n, cap - (size_t)n, "],\"more\":%s}", more ? "true" : "false");
+    return buf;
+}
+
+char *db_sqlite_query_telemetry_json(double before_ts, int limit)
+{
+    if (!g_db) return NULL;
+    if (limit <= 0) limit = 1;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT json FROM events WHERE telemetry_json IS NOT NULL "
+        "AND (?1 <= 0 OR ts < ?1) ORDER BY ts DESC LIMIT ?2";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: telemetry query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+    sqlite3_bind_double(stmt, 1, before_ts);
+    /* Fetch one extra row so "more" can be derived without a second
+     * COUNT(*) query -- if the (limit+1)th row exists, there's more. */
+    sqlite3_bind_int(stmt, 2, limit + 1);
+
+    size_t cap = 256;
+    char *buf = malloc(cap);
+    if (!buf) { sqlite3_finalize(stmt); return NULL; }
+    int n = snprintf(buf, cap, "{\"telemetry\":[");
+
+    int row_count = 0;
+    bool first = true, more = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (row_count >= limit) { more = true; break; }
+        const unsigned char *txt = sqlite3_column_text(stmt, 0);
+        int len = sqlite3_column_bytes(stmt, 0);
+        if (!txt || len <= 0) continue;
+
         size_t need = (size_t)n + 1 + (size_t)len + 24;
         if (need > cap) {
             size_t newcap = cap * 2;

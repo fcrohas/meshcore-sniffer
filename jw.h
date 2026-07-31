@@ -30,6 +30,13 @@ void jw_printf(jw_t *j, const char *fmt, ...);
 void jw_str_escaped(jw_t *j, const char *s);
 void jw_field_name(jw_t *j, const char *name);
 void jw_field_str(jw_t *j, const char *name, const char *value);
+/* Emits "name":<raw_json> with raw_json copied verbatim (no string
+ * escaping) -- for embedding an already-serialized JSON fragment
+ * (array/object) produced by another module, e.g. meshcore_lpp.c's
+ * telemetry records. No-op if raw_json is NULL/empty, same guard
+ * convention as jw_field_str(). Caller is responsible for raw_json
+ * being valid JSON. */
+void jw_field_raw(jw_t *j, const char *name, const char *raw_json);
 void jw_field_u32(jw_t *j, const char *name, uint32_t value);
 void jw_field_u64(jw_t *j, const char *name, uint64_t value);
 void jw_field_i32(jw_t *j, const char *name, int32_t value);
