@@ -867,6 +867,121 @@ static void test_txt_msg_envelope(void)
     CHECK(!g_last_ev.decrypted, "TXT_MSG: not decrypted (no ECDH key available to a passive sniffer)");
 }
 
+/* MULTIPART (payload_type 0x0A) is a cleartext wrapper, no encryption
+ * of its own: payload[0] high nibble = packets remaining, low nibble
+ * = the wrapped payload's real mc_payload_type_t. Only an ACK inside
+ * is cleartext enough to unwrap one level further. */
+static void test_multipart(void)
+{
+    /* Wraps an ACK: remaining=2, inner_type=MC_PAYLOAD_ACK(3). */
+    uint8_t frame1[64];
+    size_t  n1 = 0;
+    frame1[n1++] = (uint8_t)((MC_PAYLOAD_MULTIPART << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame1[n1++] = 0; /* path_len: hash_count=0 */
+    frame1[n1++] = (uint8_t)((2 << 4) | MC_PAYLOAD_ACK);
+    uint32_t ack_crc = 0xDEADBEEFu;
+    memcpy(&frame1[n1], &ack_crc, 4); n1 += 4;
+
+    g_last_ev_valid = false;
+    int rc1 = meshcore_packet_decode_with_radio(frame1, n1, -80.0f, 5.0f, 7, 5, 125000,
+                                                NULL, capture_cb, NULL);
+    CHECK(rc1 == 0, "MULTIPART: meshcore_packet_decode_with_radio succeeds (ACK-wrapped)");
+    CHECK(g_last_ev_valid, "MULTIPART: callback invoked (ACK-wrapped)");
+    CHECK(g_last_ev.mc_multipart_remaining == 2, "MULTIPART: remaining count == 2");
+    CHECK(g_last_ev.mc_multipart_inner_type == MC_PAYLOAD_ACK, "MULTIPART: inner_type == ACK");
+    CHECK(g_last_ev.decrypted, "MULTIPART: decrypted == true when wrapping a cleartext ACK");
+    CHECK(g_last_ev.mc_timestamp == ack_crc, "MULTIPART: unwrapped ack_crc matches");
+
+    /* Wraps a TXT_MSG: remaining=0, inner_type=MC_PAYLOAD_TXT_MSG(2) --
+     * genuinely opaque without TXT_MSG's own ECDH secret, same as if
+     * it had arrived un-wrapped. */
+    uint8_t frame2[64];
+    size_t  n2 = 0;
+    frame2[n2++] = (uint8_t)((MC_PAYLOAD_MULTIPART << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame2[n2++] = 0;
+    frame2[n2++] = (uint8_t)((0 << 4) | MC_PAYLOAD_TXT_MSG);
+    frame2[n2++] = 0x11; frame2[n2++] = 0x22; frame2[n2++] = 0x33; frame2[n2++] = 0x44;
+
+    g_last_ev_valid = false;
+    int rc2 = meshcore_packet_decode_with_radio(frame2, n2, -80.0f, 5.0f, 7, 5, 125000,
+                                                NULL, capture_cb, NULL);
+    CHECK(rc2 == 0, "MULTIPART: meshcore_packet_decode_with_radio succeeds (TXT_MSG-wrapped)");
+    CHECK(g_last_ev.mc_multipart_inner_type == MC_PAYLOAD_TXT_MSG, "MULTIPART: inner_type == TXT_MSG");
+    CHECK(!g_last_ev.decrypted, "MULTIPART: decrypted == false for a non-ACK inner type");
+}
+
+/* CONTROL (payload_type 0x0B) has no protocol-level structure beyond
+ * one reserved bit -- this tests the specific NODE_DISCOVER_REQ/_RESP
+ * application convention (simple_repeater/simple_sensor firmware). */
+static void test_control_discover(void)
+{
+    /* NODE_DISCOVER_REQ: filter=0x04, tag=0xCAFEF00D, since=0x11223344. */
+    uint8_t frame1[64];
+    size_t  n1 = 0;
+    frame1[n1++] = (uint8_t)((MC_PAYLOAD_CONTROL << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame1[n1++] = 0;
+    frame1[n1++] = 0x80; /* CTL_TYPE_NODE_DISCOVER_REQ, prefix_only=0 */
+    frame1[n1++] = 0x04; /* filter */
+    uint32_t tag1 = 0xCAFEF00Du;
+    memcpy(&frame1[n1], &tag1, 4); n1 += 4;
+    uint32_t since1 = 0x11223344u;
+    memcpy(&frame1[n1], &since1, 4); n1 += 4;
+
+    g_last_ev_valid = false;
+    int rc1 = meshcore_packet_decode_with_radio(frame1, n1, -80.0f, 5.0f, 7, 5, 125000,
+                                                NULL, capture_cb, NULL);
+    CHECK(rc1 == 0, "CONTROL: meshcore_packet_decode_with_radio succeeds (DISCOVER_REQ)");
+    CHECK(strcmp(g_last_ev.mc_ctl_subtype, "NODE_DISCOVER_REQ") == 0,
+          "CONTROL: mc_ctl_subtype == 'NODE_DISCOVER_REQ'");
+    CHECK(g_last_ev.mc_ctl_filter == 0x04, "CONTROL: filter decoded");
+    CHECK(g_last_ev.mc_ctl_tag == tag1, "CONTROL: tag decoded");
+    CHECK(g_last_ev.mc_ctl_since == since1, "CONTROL: optional since field decoded");
+    CHECK(g_last_ev.decrypted, "CONTROL: DISCOVER_REQ is fully cleartext");
+
+    /* NODE_DISCOVER_RESP: node_type=ADV_TYPE_REPEATER, snr=12.0dB (x4=48),
+     * tag echoed, 32-byte pubkey -- this is the one that should also
+     * derive a real node identity (mc_derive_from_id() in
+     * feed_meshcore_json.c / mc_node_id() in db_sqlite.c). */
+    uint8_t frame2[64];
+    size_t  n2 = 0;
+    frame2[n2++] = (uint8_t)((MC_PAYLOAD_CONTROL << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame2[n2++] = 0;
+    frame2[n2++] = (uint8_t)(0x90 | ADV_TYPE_REPEATER); /* CTL_TYPE_NODE_DISCOVER_RESP */
+    frame2[n2++] = 48; /* SNR x4 = 12.0dB */
+    uint32_t tag2 = tag1;
+    memcpy(&frame2[n2], &tag2, 4); n2 += 4;
+    uint8_t pubkey[MC_PUB_KEY_SIZE];
+    for (int i = 0; i < MC_PUB_KEY_SIZE; ++i) pubkey[i] = (uint8_t)(0x50 + i);
+    memcpy(&frame2[n2], pubkey, MC_PUB_KEY_SIZE); n2 += MC_PUB_KEY_SIZE;
+
+    g_last_ev_valid = false;
+    int rc2 = meshcore_packet_decode_with_radio(frame2, n2, -80.0f, 5.0f, 7, 5, 125000,
+                                                NULL, capture_cb, NULL);
+    CHECK(rc2 == 0, "CONTROL: meshcore_packet_decode_with_radio succeeds (DISCOVER_RESP)");
+    CHECK(strcmp(g_last_ev.mc_ctl_subtype, "NODE_DISCOVER_RESP") == 0,
+          "CONTROL: mc_ctl_subtype == 'NODE_DISCOVER_RESP'");
+    CHECK(g_last_ev.mc_adv_type == ADV_TYPE_REPEATER, "CONTROL: node_type == ADV_TYPE_REPEATER");
+    CHECK(g_last_ev.mc_ctl_snr > 11.9f && g_last_ev.mc_ctl_snr < 12.1f, "CONTROL: SNR ~12.0dB");
+    CHECK(g_last_ev.mc_ctl_tag == tag2, "CONTROL: tag echoed back matches");
+    CHECK(memcmp(g_last_ev.mc_pubkey, pubkey, MC_PUB_KEY_SIZE) == 0, "CONTROL: responder pubkey decoded");
+    CHECK(g_last_ev.decrypted, "CONTROL: DISCOVER_RESP is fully cleartext");
+
+    /* Unrecognized CONTROL sub-type (high nibble 0x50, matches
+     * neither convention) -- must not fabricate a subtype or identity. */
+    uint8_t frame3[16];
+    size_t  n3 = 0;
+    frame3[n3++] = (uint8_t)((MC_PAYLOAD_CONTROL << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame3[n3++] = 0;
+    frame3[n3++] = 0x57;
+
+    g_last_ev_valid = false;
+    int rc3 = meshcore_packet_decode_with_radio(frame3, n3, -80.0f, 5.0f, 7, 5, 125000,
+                                                NULL, capture_cb, NULL);
+    CHECK(rc3 == 0, "CONTROL: meshcore_packet_decode_with_radio succeeds (unrecognized sub-type)");
+    CHECK(g_last_ev.mc_ctl_subtype[0] == 0, "CONTROL: mc_ctl_subtype empty for an unrecognized sub-type");
+    CHECK(!g_last_ev.decrypted, "CONTROL: not decrypted for an unrecognized sub-type");
+}
+
 static void test_trace(void)
 {
     /* TRACE (payload_type 9) wire format (Mesh::onRecvPacket, v1.11+):
@@ -1058,6 +1173,8 @@ int main(void)
     test_add_channel_dedup_by_name();
     test_add_channel_out_params();
     test_txt_msg_envelope();
+    test_multipart();
+    test_control_discover();
     test_trace();
     test_region_resolve();
     test_region_dict_background_enqueue();

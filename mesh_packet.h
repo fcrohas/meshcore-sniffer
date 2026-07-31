@@ -199,6 +199,32 @@ typedef struct mesh_event {
     uint16_t mc_region_code1;
     uint16_t mc_region_code2;
     char     mc_region_name[32]; /* resolved name for code1, empty if unresolved */
+
+    /* MULTIPART (payload_type 0x0A): the core protocol adds no
+     * encryption of its own here -- payload[0]'s high nibble is the
+     * number of packets still remaining in this multipart sequence,
+     * low nibble is the WRAPPED payload's real mc_payload_type_t,
+     * followed by that inner payload verbatim (see upstream
+     * Mesh::forwardMultipartDirect()). Only ACK -- also fully
+     * cleartext -- is unwrapped one level further (into mc_timestamp,
+     * same ack_crc reuse as a direct ACK payload); any other inner
+     * type is genuinely opaque without that payload type's own
+     * envelope/crypto, same as if it had arrived un-wrapped. */
+    uint8_t  mc_multipart_remaining;
+    int      mc_multipart_inner_type; /* mc_payload_type_t of the wrapped payload */
+
+    /* CONTROL (payload_type 0x0B) node-discovery convention -- see
+     * MC_CTL_TYPE_NODE_DISCOVER_REQ/_RESP in meshcore.h for the
+     * application-vs-protocol caveat. mc_ctl_subtype is "" for a
+     * CONTROL payload that doesn't match this specific convention.
+     * DISCOVER_RESP reuses mc_pubkey/mc_adv_type below (same fields
+     * ADVERT uses) since it's the same kind of information -- a node
+     * revealing its identity in the clear. */
+    char     mc_ctl_subtype[24];  /* "NODE_DISCOVER_REQ" / "NODE_DISCOVER_RESP" / "" */
+    uint32_t mc_ctl_tag;          /* correlation tag, both REQ and RESP */
+    uint8_t  mc_ctl_filter;       /* REQ only: ADV_TYPE_* bitmask being discovered */
+    uint32_t mc_ctl_since;        /* REQ only: optional "modified since" ts, 0 if absent */
+    float    mc_ctl_snr;          /* RESP only: SNR of the REQ as heard by the responder */
 } mesh_event_t;
 
 typedef void (*mesh_event_cb_t)(const mesh_event_t *ev, void *user);

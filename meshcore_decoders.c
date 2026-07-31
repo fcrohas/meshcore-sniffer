@@ -407,6 +407,65 @@ static bool decode_unknown(const meshcore_packet_t *pkt, mesh_event_t *ev)
     return true;
 }
 
+/* ---- MULTIPART (payload_type 0x0A): cleartext wrapper, no
+ * encryption of its own -- see mc_multipart_remaining/_inner_type's
+ * doc comment in mesh_packet.h. ---- */
+static bool decode_multipart(const meshcore_packet_t *pkt, mesh_event_t *ev)
+{
+    strncpy(ev->mc_type_name, "MULTIPART", sizeof(ev->mc_type_name) - 1);
+    if (pkt->payload_len < 1) return false;
+
+    uint8_t b0 = pkt->payload[0];
+    ev->mc_multipart_remaining = b0 >> 4;
+    ev->mc_multipart_inner_type = b0 & 0x0F;
+
+    /* Only ACK is cleartext enough to unwrap one level further --
+     * matches decode_ack()'s own field reuse (mc_timestamp doubles as
+     * the ack_crc). Any other inner type needs that payload type's
+     * own envelope/crypto to go further, same as if it had arrived
+     * un-wrapped, so this is genuinely as far as we can get. */
+    if (ev->mc_multipart_inner_type == MC_PAYLOAD_ACK && pkt->payload_len >= 5) {
+        ev->mc_timestamp = rd_le32(pkt->payload + 1);
+        ev->decrypted = true;
+    } else {
+        ev->decrypted = false;
+    }
+    return true;
+}
+
+/* ---- CONTROL (payload_type 0x0B): the core protocol defines no
+ * structure here beyond one reserved bit -- see
+ * MC_CTL_TYPE_NODE_DISCOVER_REQ/_RESP's doc comment in meshcore.h for
+ * why this is an application convention, not a protocol guarantee. */
+static bool decode_control(const meshcore_packet_t *pkt, mesh_event_t *ev)
+{
+    strncpy(ev->mc_type_name, "CONTROL", sizeof(ev->mc_type_name) - 1);
+    if (pkt->payload_len < 1) return false;
+
+    uint8_t b0 = pkt->payload[0];
+    uint8_t subtype = b0 & 0xF0;
+
+    if (subtype == MC_CTL_TYPE_NODE_DISCOVER_REQ && pkt->payload_len >= 6) {
+        strncpy(ev->mc_ctl_subtype, "NODE_DISCOVER_REQ", sizeof(ev->mc_ctl_subtype) - 1);
+        ev->mc_ctl_filter = pkt->payload[1];
+        ev->mc_ctl_tag = rd_le32(pkt->payload + 2);
+        if (pkt->payload_len >= 10)
+            ev->mc_ctl_since = rd_le32(pkt->payload + 6);
+        ev->decrypted = true;
+    } else if (subtype == MC_CTL_TYPE_NODE_DISCOVER_RESP &&
+               pkt->payload_len >= (size_t)(6 + MC_PUB_KEY_SIZE)) {
+        strncpy(ev->mc_ctl_subtype, "NODE_DISCOVER_RESP", sizeof(ev->mc_ctl_subtype) - 1);
+        ev->mc_adv_type = b0 & 0x0F;
+        ev->mc_ctl_snr = (float)((int8_t)pkt->payload[1]) / 4.0f;
+        ev->mc_ctl_tag = rd_le32(pkt->payload + 2);
+        memcpy(ev->mc_pubkey, pkt->payload + 6, MC_PUB_KEY_SIZE);
+        ev->decrypted = true;
+    } else {
+        ev->decrypted = false;
+    }
+    return true;
+}
+
 int meshcore_packet_decode_with_radio(const uint8_t *frame, size_t frame_len,
                                       float rssi_db, float snr_db,
                                       int sf, int cr, int bw_hz,
@@ -482,7 +541,11 @@ int meshcore_packet_decode_with_radio(const uint8_t *frame, size_t frame_len,
         ok = decode_envelope_only(&pkt, &ev, "ANON_REQ", true);
         break;
     case MC_PAYLOAD_MULTIPART:
+        ok = decode_multipart(&pkt, &ev);
+        break;
     case MC_PAYLOAD_CONTROL:
+        ok = decode_control(&pkt, &ev);
+        break;
     case MC_PAYLOAD_RAW_CUSTOM:
     default:
         ok = decode_unknown(&pkt, &ev);

@@ -163,12 +163,58 @@ static void test_ack_has_no_from(void)
           "ACK: no fabricated 'from' field for events with no identity info");
 }
 
+/* CONTROL's NODE_DISCOVER_RESP application convention (simple_repeater/
+ * simple_sensor firmware) reveals a responding node's full pubkey +
+ * SNR in the clear -- as informative as an ADVERT, just via a
+ * different mechanism. Mirrors test_advert_node_and_position_visible()
+ * above: confirms it also derives a real "from" id and populates
+ * node_db, so a repeater answering a discovery probe lights up the
+ * node list/map even if it never happens to send a fresh ADVERT. */
+static void test_control_discover_resp_node_visible(void)
+{
+    mesh_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore     = true;
+    ev.decrypted       = true;
+    ev.mc_payload_type = MC_PAYLOAD_CONTROL;
+    ev.slot_id         = -1;
+    strncpy(ev.mc_type_name, "CONTROL", sizeof(ev.mc_type_name) - 1);
+    strncpy(ev.mc_ctl_subtype, "NODE_DISCOVER_RESP", sizeof(ev.mc_ctl_subtype) - 1);
+    ev.mc_adv_type = ADV_TYPE_REPEATER;
+    ev.mc_ctl_snr  = 12.0f;
+    ev.mc_ctl_tag  = 0xCAFEF00Du;
+    for (int i = 0; i < MC_PUB_KEY_SIZE; ++i) ev.mc_pubkey[i] = (uint8_t)(0x50 + i);
+
+    char buf[2048];
+    jw_t j;
+    jw_init(&j, buf, sizeof(buf));
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
+    buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
+
+    CHECK(strstr(buf, "\"from\":\"!") != NULL,
+          "CONTROL DISCOVER_RESP: JSON contains a generic 'from' field");
+    CHECK(strstr(buf, "\"ctl_subtype\":\"NODE_DISCOVER_RESP\"") != NULL,
+          "CONTROL DISCOVER_RESP: JSON contains 'ctl_subtype'");
+    CHECK(strstr(buf, "\"adv_type_name\":\"REPEATER\"") != NULL,
+          "CONTROL DISCOVER_RESP: JSON contains 'adv_type_name'");
+
+    uint32_t expect_id = ((uint32_t)ev.mc_pubkey[0] << 24) |
+                         ((uint32_t)ev.mc_pubkey[1] << 16) |
+                         ((uint32_t)ev.mc_pubkey[2] << 8)  |
+                          (uint32_t)ev.mc_pubkey[3];
+    node_record_t rec;
+    bool found = node_db_lookup(expect_id, &rec);
+    CHECK(found, "CONTROL DISCOVER_RESP: node_db now has an entry for the derived "
+                 "pseudo-id, same as an ADVERT would produce");
+}
+
 int main(void)
 {
     test_grp_txt_text_and_from_visible();
     test_grp_txt_undecrypted_no_text();
     test_advert_node_and_position_visible();
     test_ack_has_no_from();
+    test_control_discover_resp_node_visible();
 
     if (failures) {
         fprintf(stderr, "\n%d check(s) failed\n", failures);

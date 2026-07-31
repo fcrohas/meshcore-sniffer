@@ -23,6 +23,7 @@
 #include "node_db.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <sys/time.h>
 
 /* Derive a stable pseudo node-id (Meshtastic-style 32-bit "from") for
@@ -33,6 +34,11 @@
  *
  *   - ADVERT / ANON_REQ carry a 32-byte Ed25519 pubkey: use its first
  *     4 bytes as the id. Stable per physical node across packets.
+ *     CONTROL's NODE_DISCOVER_RESP sub-type (application convention,
+ *     see MC_CTL_TYPE_NODE_DISCOVER_RESP in meshcore.h) reveals the
+ *     same kind of pubkey in the clear -- reuses mc_pubkey/the same
+ *     id derivation, so a responding repeater lights up the node
+ *     list/map exactly like an ADVERT would.
  *   - GRP_TXT / GRP_DATA (channel broadcast) carry no sender identity
  *     visible to a passive sniffer -- group by channel hash instead
  *     (tagged with the top bit set) so messages on the same channel
@@ -41,14 +47,17 @@
  *   - Envelope-only types (REQ/RESPONSE/PATH) that exposed a
  *     dest/src hash get a low-quality id from those bytes (tagged
  *     with a different high bit) so they're at least visible.
- *   - Everything else (ACK, unknown/control frames) has no usable
- *     identity; returns 0, and the caller omits "from" for those,
- *     matching prior behavior (they were never actionable sightings).
+ *   - Everything else (ACK, MULTIPART, CONTROL's other sub-types,
+ *     unknown frames) has no usable identity; returns 0, and the
+ *     caller omits "from" for those, matching prior behavior (they
+ *     were never actionable sightings).
  */
 static uint32_t mc_derive_from_id(const mesh_event_t *ev)
 {
     if (ev->mc_payload_type == MC_PAYLOAD_ADVERT ||
-        ev->mc_payload_type == MC_PAYLOAD_ANON_REQ) {
+        ev->mc_payload_type == MC_PAYLOAD_ANON_REQ ||
+        (ev->mc_payload_type == MC_PAYLOAD_CONTROL && ev->decrypted &&
+         !strcmp(ev->mc_ctl_subtype, "NODE_DISCOVER_RESP"))) {
         return ((uint32_t)ev->mc_pubkey[0] << 24) |
                ((uint32_t)ev->mc_pubkey[1] << 16) |
                ((uint32_t)ev->mc_pubkey[2] << 8)  |
@@ -233,6 +242,35 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
          * escaped): it's already a JSON array. */
         jw_field_raw(j, "telemetry", ev->mc_telemetry_json);
     }
+    if (ev->mc_payload_type == MC_PAYLOAD_MULTIPART) {
+        jw_field_u32(j, "multipart_remaining", (uint32_t)ev->mc_multipart_remaining);
+        jw_field_str(j, "multipart_inner_type", mc_payload_type_name(ev->mc_multipart_inner_type));
+        /* decrypted/timestamp only meaningful when the wrapped payload
+         * was itself cleartext (ACK) -- see decode_multipart()'s doc
+         * comment in meshcore_decoders.c. */
+        if (ev->decrypted) jw_field_u32(j, "ack_crc", ev->mc_timestamp);
+    }
+    if (ev->mc_payload_type == MC_PAYLOAD_CONTROL && ev->mc_ctl_subtype[0]) {
+        /* CTL_TYPE_NODE_DISCOVER_REQ/_RESP is an application convention
+         * (see MC_CTL_TYPE_NODE_DISCOVER_REQ's doc comment in
+         * meshcore.h), not a protocol guarantee -- mc_ctl_subtype is
+         * only ever non-empty when this specific convention matched. */
+        jw_field_str(j, "ctl_subtype", ev->mc_ctl_subtype);
+        jw_field_u32(j, "ctl_tag", ev->mc_ctl_tag);
+        if (!strcmp(ev->mc_ctl_subtype, "NODE_DISCOVER_REQ")) {
+            jw_field_u32(j, "ctl_filter", (uint32_t)ev->mc_ctl_filter);
+            if (ev->mc_ctl_since) jw_field_u32(j, "ctl_since", ev->mc_ctl_since);
+        } else if (!strcmp(ev->mc_ctl_subtype, "NODE_DISCOVER_RESP")) {
+            static const char *adv_type_names[] = {
+                "NONE", "CHAT", "REPEATER", "ROOM", "SENSOR",
+            };
+            const char *adv_type_name = ev->mc_adv_type < 5
+                ? adv_type_names[ev->mc_adv_type] : "UNKNOWN";
+            jw_field_u32(j, "adv_type", (uint32_t)ev->mc_adv_type);
+            jw_field_str(j, "adv_type_name", adv_type_name);
+            jw_field_f32(j, "ctl_snr", ev->mc_ctl_snr);
+        }
+    }
 
     jw_close(j);
 
@@ -242,9 +280,20 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
      * position) is queryable the same way for both protocols. Gated
      * on from_id != 0 -- ADVERT always derives a nonzero id from its
      * pubkey (see mc_derive_from_id), so this only no-ops for the
-     * (impossible in practice) all-zero-pubkey case. */
-    if (ev->decrypted && ev->mc_payload_type == MC_PAYLOAD_ADVERT &&
-        ev->mc_has_name && from_id) {
+     * (impossible in practice) all-zero-pubkey case.
+     *
+     * CONTROL's NODE_DISCOVER_RESP (see mc_derive_from_id()'s doc
+     * comment) reveals the same kind of pubkey/role in the clear but
+     * never a name -- still worth registering (empty long_name is a
+     * safe no-op in node_db_remember(), never clobbers a name learned
+     * from a real ADVERT) so a repeater that only ever answers
+     * discovery probes still lights up the node list/map with its
+     * role, instead of staying invisible until it happens to send a
+     * fresh ADVERT. */
+    bool is_advert_named = ev->mc_payload_type == MC_PAYLOAD_ADVERT && ev->mc_has_name;
+    bool is_ctl_discover_resp = ev->mc_payload_type == MC_PAYLOAD_CONTROL &&
+                                !strcmp(ev->mc_ctl_subtype, "NODE_DISCOVER_RESP");
+    if (ev->decrypted && from_id && (is_advert_named || is_ctl_discover_resp)) {
         /* role: persists mc_adv_type (NONE/CHAT/REPEATER/ROOM/SENSOR,
          * same small enum as adv_type_name above) into the nodes
          * table's generic "role" column, purely a MeshCore <-> Meshtastic

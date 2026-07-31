@@ -111,7 +111,9 @@ static const char *INSERT_SQL =
 /* Same derivation as mc_derive_from_id() in feed_meshcore_json.c
  * (kept independent rather than exported/shared, since this is the
  * only other consumer and the two files are otherwise unrelated):
- * ADVERT/ANON_REQ key off the sender's pubkey prefix, GRP_TXT/GRP_DATA
+ * ADVERT/ANON_REQ key off the sender's pubkey prefix (CONTROL's
+ * NODE_DISCOVER_RESP application convention reveals the same kind of
+ * pubkey in the clear, so it's keyed the same way), GRP_TXT/GRP_DATA
  * key off the channel hash (tagged, so group traffic groups together
  * without colliding with a real node id), REQ/RESPONSE/PATH/TXT_MSG
  * key off whatever dest/src hash bytes are visible, everything else
@@ -119,7 +121,9 @@ static const char *INSERT_SQL =
 static uint32_t mc_node_id(const mesh_event_t *ev)
 {
     if (ev->mc_payload_type == MC_PAYLOAD_ADVERT ||
-        ev->mc_payload_type == MC_PAYLOAD_ANON_REQ) {
+        ev->mc_payload_type == MC_PAYLOAD_ANON_REQ ||
+        (ev->mc_payload_type == MC_PAYLOAD_CONTROL && ev->decrypted &&
+         !strcmp(ev->mc_ctl_subtype, "NODE_DISCOVER_RESP"))) {
         return ((uint32_t)ev->mc_pubkey[0] << 24) |
                ((uint32_t)ev->mc_pubkey[1] << 16) |
                ((uint32_t)ev->mc_pubkey[2] << 8)  |

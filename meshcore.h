@@ -86,6 +86,22 @@ typedef enum {
 #define ADV_FEAT2_MASK   0x40
 #define ADV_NAME_MASK    0x80
 
+/* ---- CONTROL (payload_type 0x0B) node-discovery sub-type, upper
+ * nibble of payload[0] ----
+ * The core protocol reserves only one bit at this layer (payload[0] &
+ * 0x80, checked in upstream Mesh::onRecvPacket() before any hop
+ * count); everything else is an APPLICATION convention, not a
+ * protocol guarantee -- a CONTROL payload from a different app can
+ * mean something else entirely. This specific convention (from
+ * upstream examples/simple_repeater and examples/simple_sensor's
+ * MyMesh.cpp, the near-universal repeater/sensor firmware) is
+ * completely unencrypted: DISCOVER_REQ carries filter/tag/optional-
+ * since, DISCOVER_RESP reveals the responding node's full public key
+ * + SNR in the clear -- as informative as an ADVERT, just via a
+ * different mechanism. */
+#define MC_CTL_TYPE_NODE_DISCOVER_REQ  0x80
+#define MC_CTL_TYPE_NODE_DISCOVER_RESP 0x90
+
 /* ---- path/hash sizing ---- */
 #define MC_MAX_PACKET_PAYLOAD 184
 #define MC_MAX_PATH_SIZE      64
