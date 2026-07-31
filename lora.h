@@ -46,6 +46,13 @@ typedef struct lora_frame_meta {
      * treating a corrected frame as untrustworthy: a single-bit CRC16
      * match is not a coincidence at any realistic payload length. */
     bool     crc_corrected;
+    /* 0 = not corrected, 1 = single-bit fix (crc_corrected implies
+     * this is 1 or 2), 2 = two-bit fix. A 2-bit fix is NOT trustworthy
+     * on CRC agreement alone -- see lora_crc_bruteforce_correct_2bit's
+     * doc and mesh_event_crc2bit_trusted() in meshcore_decoders.c, which
+     * downstream consumers must call before treating crc_corrected_bits
+     * == 2 content as genuine. */
+    int      crc_corrected_bits;
     float    rssi_db;       /* indicated by demodulator (estimated) */
     float    snr_db;
     float    cfo_hz;        /* carrier frequency offset estimate */
@@ -147,6 +154,15 @@ void lora_decoder_set_center_freq(lora_decoder_t *dec, double center_freq_hz);
  * that use it standalone, without pulling in options.c. */
 void lora_decoder_set_crc_bruteforce(lora_decoder_t *dec, bool enable);
 
+/* Enable/disable the two-bit CRC brute-force fallback (see
+ * lora_crc_bruteforce_correct_2bit below), tried only after the
+ * single-bit search fails. Off by default. A caller enabling this
+ * MUST also gate acceptance of crc_corrected_bits==2 frames on
+ * independent authentication downstream (mesh_event_crc2bit_trusted()
+ * in mesh_packet.c) -- a bare 2-bit CRC16 match is not trustworthy on
+ * its own; see the doc on lora_crc_bruteforce_correct_2bit. */
+void lora_decoder_set_crc_bruteforce_2bit(lora_decoder_t *dec, bool enable);
+
 /* Feed one batch of complex baseband samples (rate = bw_hz). */
 void lora_decoder_feed(lora_decoder_t *dec,
                        const float complex *samples, size_t n);
@@ -187,6 +203,25 @@ uint16_t lora_crc16(const uint8_t *data, size_t len);
  * is negligible against demod cost even at high frame rates. Exposed
  * here (pure function, no decoder state) for direct unit testing. */
 bool lora_crc_bruteforce_correct(uint8_t *bytes, size_t byte_count);
+
+/* Two-bit CRC brute-force recovery: same convention as
+ * lora_crc_bruteforce_correct above, tried only after it fails.
+ * Runs in O(byte_count) via a linear-CRC delta technique (CRC16 with
+ * a zero seed is GF(2)-linear), not the O(byte_count^3) a naive
+ * nested 2-bit search would cost -- see the implementation comment
+ * in lora.c for the derivation.
+ *
+ * UNLIKE the single-bit version, a true return here is NOT strong
+ * evidence: for payloads over ~50 bytes the 2-bit search space
+ * exceeds CRC16's 65536 possible values, so an accidental match on
+ * wrong content becomes likely. Callers must independently
+ * authenticate the result before trusting/publishing it -- see
+ * mesh_event_crc2bit_trusted() in meshcore_decoders.c, which gates on
+ * MeshCore's per-channel HMAC (GRP_TXT/GRP_DATA) or Ed25519 signature
+ * (ADVERT). There is no equivalent check for the Meshtastic protocol
+ * path or other MeshCore payload types in this codebase, so a 2-bit
+ * fix on those should never be trusted. */
+bool lora_crc_bruteforce_correct_2bit(uint8_t *bytes, size_t byte_count);
 
 /* Diagonal deinterleave: cr_use codewords of (sf_app=sf-2 | sf) bits each
  * are stored by row at the demod output; we read them back diagonally

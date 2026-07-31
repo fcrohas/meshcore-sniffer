@@ -16,11 +16,14 @@
 #include "meshcore.h"
 #include "meshcore_packet.h"
 #include "meshcore_decoders.h"
+#include "meshcore_lpp.h"
+#include "meshcore_region_dict.h"
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures = 0;
 
@@ -196,6 +199,83 @@ static void test_advert_latlon_implausible(void)
     CHECK(!ev2.mc_has_latlon, "ADVERT null-island: has_latlon NOT set for (0,0)");
 }
 
+/* mesh_event_crc2bit_trusted() (meshcore_decoders.c) is the gate
+ * main.c's on_mesh_event() uses before publishing a crc_corrected_bits
+ * >= 2 frame as genuinely corrected: a bare 2-bit CRC16 match collides
+ * with wrong content often enough (see lora_crc_bruteforce_correct_2bit's
+ * doc) that it must not be trusted without independent authentication.
+ * Exercises every branch directly against a constructed mesh_event_t,
+ * no frame parsing required since this is a pure predicate. */
+static void test_crc2bit_trust_gate(void)
+{
+    mesh_event_t ev;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = true;
+    ev.mc_payload_type = MC_PAYLOAD_GRP_TXT;
+    ev.decrypted = true;
+    CHECK(mesh_event_crc2bit_trusted(&ev),
+          "GRP_TXT with decrypted=true (channel HMAC verified) is trusted");
+
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = true;
+    ev.mc_payload_type = MC_PAYLOAD_GRP_TXT;
+    ev.decrypted = false;
+    CHECK(!mesh_event_crc2bit_trusted(&ev),
+          "GRP_TXT with decrypted=false (no channel HMAC match) is NOT trusted");
+
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = true;
+    ev.mc_payload_type = MC_PAYLOAD_GRP_DATA;
+    ev.decrypted = true;
+    CHECK(mesh_event_crc2bit_trusted(&ev),
+          "GRP_DATA with decrypted=true is trusted");
+
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = true;
+    ev.mc_payload_type = MC_PAYLOAD_ADVERT;
+    ev.mc_sig_valid = true;
+    CHECK(mesh_event_crc2bit_trusted(&ev),
+          "ADVERT with mc_sig_valid=true (Ed25519 verified) is trusted");
+
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = true;
+    ev.mc_payload_type = MC_PAYLOAD_ADVERT;
+    ev.mc_sig_valid = false;
+    CHECK(!mesh_event_crc2bit_trusted(&ev),
+          "ADVERT with mc_sig_valid=false is NOT trusted");
+
+    /* Payload types with no independent MAC/signature check anywhere
+     * in this codebase (ACK has no crypto field at all; TXT_MSG/REQ/
+     * RESPONSE/PATH/ANON_REQ carry a MAC this passive sniffer can't
+     * verify without the peer's ECDH secret; TRACE's auth_code is
+     * parsed but not checked) must never be trusted regardless of
+     * decrypted/mc_sig_valid. */
+    int untrusted_types[] = { MC_PAYLOAD_ACK, MC_PAYLOAD_TXT_MSG, MC_PAYLOAD_REQ,
+                               MC_PAYLOAD_RESPONSE, MC_PAYLOAD_PATH, MC_PAYLOAD_ANON_REQ,
+                               MC_PAYLOAD_TRACE, MC_PAYLOAD_MULTIPART, MC_PAYLOAD_CONTROL,
+                               MC_PAYLOAD_RAW_CUSTOM };
+    for (size_t i = 0; i < sizeof(untrusted_types) / sizeof(untrusted_types[0]); ++i) {
+        memset(&ev, 0, sizeof(ev));
+        ev.is_meshcore = true;
+        ev.mc_payload_type = untrusted_types[i];
+        ev.decrypted = true;
+        ev.mc_sig_valid = true;
+        CHECK(!mesh_event_crc2bit_trusted(&ev),
+              "payload type with no MAC/signature check is never trusted even if decrypted/mc_sig_valid are true");
+    }
+
+    /* The Meshtastic protocol path has no equivalent authentication in
+     * this codebase -- is_meshcore=false must never be trusted no
+     * matter what the other fields say. */
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore = false;
+    ev.mc_payload_type = MC_PAYLOAD_GRP_TXT;
+    ev.decrypted = true;
+    CHECK(!mesh_event_crc2bit_trusted(&ev),
+          "Meshtastic path (is_meshcore=false) is never trusted");
+}
+
 static void test_grp_txt_crypto(void)
 {
     /* Known 32-byte secret. */
@@ -368,6 +448,152 @@ static void test_grp_data_dispatch(void)
     CHECK(ev.mc_data_type == data_type, "GRP_DATA: data_type round-trips");
     CHECK(ev.mc_data_len == data_len, "GRP_DATA: data_len round-trips");
     CHECK(strcmp(ev.mc_text, "deadbeef0102") == 0, "GRP_DATA: hex dump of blob matches");
+
+    meshcore_channelset_destroy(cs);
+}
+
+/* Regression/coverage for meshcore_lpp_decode() (meshcore_lpp.c) in
+ * isolation -- validates against known-good encoded values (matching
+ * MeshCore firmware's LPPDataHelpers.h scaling exactly) plus the
+ * rejection paths that keep GRP_DATA telemetry decode from
+ * false-positiving on non-telemetry app data. */
+static void test_lpp_decode(void)
+{
+    /* channel=1 VOLTAGE(116): 3.85V -> 385 = 0x0181.
+     * channel=1 TEMPERATURE(103): 23.4C -> 234 = 0x00EA.
+     * channel=2 HUMIDITY(104): 45% -> 90 = 0x5A (90/2). */
+    uint8_t buf[] = {
+        1, 116, 0x01, 0x81,
+        1, 103, 0x00, 0xEA,
+        2, 104, 0x5A,
+    };
+    meshcore_lpp_record_t recs[MESHCORE_LPP_MAX_RECORDS];
+    int n = meshcore_lpp_decode(buf, sizeof(buf), recs, MESHCORE_LPP_MAX_RECORDS);
+    CHECK(n == 3, "LPP: 3-record buffer decodes to 3 records");
+    CHECK(recs[0].type == 116 && recs[0].values[0] > 3.84f && recs[0].values[0] < 3.86f,
+          "LPP: voltage record ~3.85V");
+    CHECK(recs[1].type == 103 && recs[1].values[0] > 23.3f && recs[1].values[0] < 23.5f,
+          "LPP: temperature record ~23.4C");
+    CHECK(recs[2].type == 104 && recs[2].values[0] > 44.9f && recs[2].values[0] < 45.1f,
+          "LPP: humidity record ~45%%");
+
+    char json[512];
+    int jl = meshcore_lpp_to_json(recs, n, json, sizeof(json));
+    CHECK(jl > 0, "LPP: to_json produces non-empty output");
+    CHECK(strstr(json, "\"name\":\"voltage\"") != NULL, "LPP: JSON contains voltage record");
+    CHECK(strstr(json, "\"name\":\"temperature\"") != NULL, "LPP: JSON contains temperature record");
+
+    char txt[256];
+    int tl = meshcore_lpp_to_text(recs, n, txt, sizeof(txt));
+    CHECK(tl > 0, "LPP: to_text produces non-empty output");
+
+    /* Negative temperature: -5.2C -> -52 = 0xFFCC (16-bit two's complement). */
+    uint8_t buf_neg[] = { 1, 103, 0xFF, 0xCC };
+    int n_neg = meshcore_lpp_decode(buf_neg, sizeof(buf_neg), recs, MESHCORE_LPP_MAX_RECORDS);
+    CHECK(n_neg == 1, "LPP: negative-temperature buffer decodes to 1 record");
+    CHECK(recs[0].values[0] > -5.3f && recs[0].values[0] < -5.1f,
+          "LPP: negative temperature decodes to ~-5.2C (two's complement)");
+
+    /* GPS: 3x 3-byte signed sub-fields (lat/lon /10000, alt /100). */
+    int32_t lati = (int32_t)(45.1234 * 10000);
+    int32_t loni = (int32_t)(5.6789 * 10000);
+    int32_t alti = (int32_t)(250.5 * 100);
+    uint8_t gpsbuf[11] = {
+        1, 136,
+        (uint8_t)(lati >> 16), (uint8_t)(lati >> 8), (uint8_t)lati,
+        (uint8_t)(loni >> 16), (uint8_t)(loni >> 8), (uint8_t)loni,
+        (uint8_t)(alti >> 16), (uint8_t)(alti >> 8), (uint8_t)alti,
+    };
+    int n_gps = meshcore_lpp_decode(gpsbuf, sizeof(gpsbuf), recs, MESHCORE_LPP_MAX_RECORDS);
+    CHECK(n_gps == 1 && recs[0].n_values == 3, "LPP: GPS record decodes with 3 sub-values");
+    CHECK(recs[0].values[0] > 45.12f && recs[0].values[0] < 45.13f, "LPP: GPS lat ~45.1234");
+    CHECK(recs[0].values[1] > 5.67f && recs[0].values[1] < 5.69f, "LPP: GPS lon ~5.6789");
+    CHECK(recs[0].values[2] > 250.4f && recs[0].values[2] < 250.6f, "LPP: GPS alt ~250.5m");
+
+    /* Arbitrary non-LPP bytes must be rejected, not misparsed -- this
+     * is what keeps GRP_DATA telemetry decode from false-positiving on
+     * ordinary app data that happens to share the wire shape. */
+    uint8_t garbage[] = { 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0 };
+    CHECK(meshcore_lpp_decode(garbage, sizeof(garbage), recs, MESHCORE_LPP_MAX_RECORDS) == -1,
+          "LPP: unknown type codes are rejected, not misparsed");
+
+    /* Truncated final record (declares a 2-byte value, only 1 byte present). */
+    uint8_t trunc[] = { 1, 103, 0x00 };
+    CHECK(meshcore_lpp_decode(trunc, sizeof(trunc), recs, MESHCORE_LPP_MAX_RECORDS) == -1,
+          "LPP: truncated record is rejected");
+
+    /* Empty buffer. */
+    CHECK(meshcore_lpp_decode(buf, 0, recs, MESHCORE_LPP_MAX_RECORDS) == -1,
+          "LPP: zero-length buffer is rejected");
+}
+
+/* End-to-end: a GRP_DATA frame whose decrypted blob is a valid
+ * CayenneLPP record stream must populate mc_telemetry_json (not just
+ * fall back to the hex dump test_grp_data_dispatch already covers for
+ * non-LPP blobs). Uses the same encrypt-a-frame scaffolding as
+ * test_grp_data_dispatch. */
+static void test_grp_data_lpp_telemetry(void)
+{
+    uint8_t secret[MC_CHANNEL_SECRET_BYTES];
+    for (int i = 0; i < MC_CHANNEL_SECRET_BYTES; ++i) secret[i] = (uint8_t)(0x30 + i);
+
+    /* channel=1 VOLTAGE(116): 3.85V; channel=1 TEMPERATURE(103): 23.4C. */
+    uint8_t blob[8] = { 1, 116, 0x01, 0x81, 1, 103, 0x00, 0xEA };
+    uint16_t data_type = 0x0100; /* "MeshCore Open" per docs/number_allocations.md */
+    uint8_t data_len = (uint8_t)sizeof(blob);
+
+    uint8_t plain[32] = {0};
+    plain[0] = (uint8_t)(data_type); plain[1] = (uint8_t)(data_type >> 8);
+    plain[2] = data_len;
+    memcpy(plain + 3, blob, sizeof(blob));
+    size_t plain_len = 3 + sizeof(blob);
+    size_t padded_len = ((plain_len + 15) / 16) * 16;
+
+    uint8_t ciphertext[32] = {0};
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int outlen1 = 0, outlen2 = 0;
+    EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, secret, NULL);
+    EVP_CIPHER_CTX_set_padding(ctx, 0);
+    EVP_EncryptUpdate(ctx, ciphertext, &outlen1, plain, (int)padded_len);
+    EVP_EncryptFinal_ex(ctx, ciphertext + outlen1, &outlen2);
+    EVP_CIPHER_CTX_free(ctx);
+    size_t cipher_len = (size_t)(outlen1 + outlen2);
+
+    unsigned char hmac_full[EVP_MAX_MD_SIZE];
+    unsigned int hmac_len = 0;
+    HMAC(EVP_sha256(), secret, MC_PUB_KEY_SIZE, ciphertext, cipher_len, hmac_full, &hmac_len);
+
+    uint8_t frame[300];
+    size_t n = 0;
+    frame[n++] = (uint8_t)((MC_PAYLOAD_GRP_DATA << MC_HEADER_PAYLOAD_TYPE_SHIFT) | MC_ROUTE_FLOOD);
+    frame[n++] = 0;
+    uint8_t channel_hash = meshcore_channel_hash(secret, MC_CHANNEL_SECRET_BYTES);
+    frame[n++] = channel_hash;
+    memcpy(frame + n, hmac_full, MC_CIPHER_MAC_SIZE); n += MC_CIPHER_MAC_SIZE;
+    memcpy(frame + n, ciphertext, cipher_len); n += cipher_len;
+
+    meshcore_packet_t pkt;
+    CHECK(meshcore_packet_parse(frame, n, &pkt) == 0, "GRP_DATA LPP: meshcore_packet_parse succeeds");
+
+    meshcore_channelset_t *cs = meshcore_channelset_create();
+    char spec[16 + 1 + MC_CHANNEL_SECRET_BYTES * 2 + 1];
+    snprintf(spec, sizeof(spec), "TelemChan:");
+    size_t off = strlen(spec);
+    for (int i = 0; i < MC_CHANNEL_SECRET_BYTES; ++i)
+        off += (size_t)snprintf(spec + off, sizeof(spec) - off, "%02x", secret[i]);
+    CHECK(meshcore_channelset_add_spec(cs, spec, NULL, NULL) == 0, "GRP_DATA LPP: channelset_add_spec succeeds");
+
+    mesh_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    bool ok = meshcore_decode_grp_data(&pkt, cs, &ev);
+    CHECK(ok, "GRP_DATA LPP: meshcore_decode_grp_data succeeds");
+    CHECK(ev.decrypted, "GRP_DATA LPP: payload decrypted");
+    CHECK(strlen(ev.mc_telemetry_json) > 0, "GRP_DATA LPP: mc_telemetry_json populated");
+    CHECK(strstr(ev.mc_telemetry_json, "\"name\":\"voltage\"") != NULL,
+          "GRP_DATA LPP: telemetry JSON contains the voltage record");
+    CHECK(strstr(ev.mc_telemetry_json, "\"name\":\"temperature\"") != NULL,
+          "GRP_DATA LPP: telemetry JSON contains the temperature record");
+    CHECK(strstr(ev.mc_text, "voltage") != NULL, "GRP_DATA LPP: mc_text summary readable, not a hex dump");
 
     meshcore_channelset_destroy(cs);
 }
@@ -688,14 +914,144 @@ static void test_trace(void)
           "TRACE: hop_count reflects the full route length (3), not just SNRs collected so far (2)");
 }
 
+/* Reference implementation of upstream's TransportKey::calcTransportCode(),
+ * independent of meshcore_region_dict.c's own copy, so this test actually
+ * proves the dictionary attack matches what a real firmware node would
+ * compute -- not just that our two copies of the same formula agree. */
+static uint16_t ref_region_transport_code(const char *region_name, uint8_t payload_type,
+                                          const uint8_t *payload, size_t payload_len)
+{
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int  dlen = 0;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+    EVP_DigestUpdate(ctx, region_name, strlen(region_name));
+    EVP_DigestFinal_ex(ctx, digest, &dlen);
+    EVP_MD_CTX_free(ctx);
+    uint8_t key[16];
+    memcpy(key, digest, 16);
+
+    uint8_t msg[256];
+    msg[0] = payload_type;
+    memcpy(msg + 1, payload, payload_len);
+    unsigned char hmac_full[EVP_MAX_MD_SIZE];
+    unsigned int  hmac_len = 0;
+    HMAC(EVP_sha256(), key, 16, msg, payload_len + 1, hmac_full, &hmac_len);
+
+    uint16_t code = (uint16_t)hmac_full[0] | ((uint16_t)hmac_full[1] << 8);
+    if (code == 0) code = 1;
+    else if (code == 0xFFFF) code = 0xFFFE;
+    return code;
+}
+
+static void test_region_resolve(void)
+{
+    uint8_t payload_type = MC_PAYLOAD_GRP_TXT;
+    uint8_t payload[10]  = {0xAA, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99};
+
+    /* "#Europe" -- exactly as typed in the upstream docs' own examples. */
+    uint16_t code = ref_region_transport_code("#Europe", payload_type, payload, sizeof(payload));
+    char name[64] = {0};
+    bool ok = meshcore_region_resolve_full(payload_type, payload, sizeof(payload), code, name, sizeof(name));
+    CHECK(ok, "region: '#Europe' transport code resolves");
+    CHECK(ok && !strcmp(name, "#Europe"), "region: resolved name == '#Europe'");
+
+    /* Lowercase, no leading '#' -- exercises the case-variant + bare-name path. */
+    uint8_t payload2[6] = {1, 2, 3, 4, 5, 6};
+    uint16_t code2 = ref_region_transport_code("uk", payload_type, payload2, sizeof(payload2));
+    char name2[64] = {0};
+    bool ok2 = meshcore_region_resolve_full(payload_type, payload2, sizeof(payload2), code2, name2, sizeof(name2));
+    CHECK(ok2, "region: lowercase 'uk' (no '#') transport code resolves");
+    CHECK(ok2 && !strcmp(name2, "uk"), "region: resolved name == 'uk'");
+
+    /* Same region name again with different payload bytes (different code,
+     * since the HMAC is payload-dependent) -- exercises the confirmed-name
+     * fast path added after the first '#Europe' match above. */
+    uint8_t payload3[4] = {9, 9, 9, 9};
+    uint16_t code3 = ref_region_transport_code("#Europe", payload_type, payload3, sizeof(payload3));
+    char name3[64] = {0};
+    bool ok3 = meshcore_region_resolve_full(payload_type, payload3, sizeof(payload3), code3, name3, sizeof(name3));
+    CHECK(ok3 && !strcmp(name3, "#Europe"), "region: '#Europe' resolves again via confirmed-name cache");
+
+    /* A private/unlisted region name must NOT produce a false-positive match. */
+    uint16_t code4 = ref_region_transport_code("SomeSecretPrivateRegionXYZ", payload_type, payload, sizeof(payload));
+    char name4[64] = {0};
+    bool ok4 = meshcore_region_resolve_full(payload_type, payload, sizeof(payload), code4, name4, sizeof(name4));
+    CHECK(!ok4, "region: unlisted private region name does not false-positive");
+
+    /* French department/region shorthand -- same generated set the
+     * channel hashtag dictionary attack already uses (fr-<dept>,
+     * fr-<region abbrev>, eu/europe/fr/france), now also tried for
+     * region-scope names since French deployments commonly name their
+     * scope the same short way (e.g. "fr-occ" for Occitanie). */
+    uint8_t payload5[8] = {5, 4, 3, 2, 1, 0, 9, 8};
+    uint16_t code5 = ref_region_transport_code("fr-occ", payload_type, payload5, sizeof(payload5));
+    char name5[64] = {0};
+    bool ok5 = meshcore_region_resolve_full(payload_type, payload5, sizeof(payload5), code5, name5, sizeof(name5));
+    CHECK(ok5 && !strcmp(name5, "fr-occ"), "region: 'fr-occ' (Occitanie) resolves via the generated fr-<region> set");
+
+    uint8_t payload6[5] = {7, 7, 7, 7, 7};
+    uint16_t code6 = ref_region_transport_code("fr-naq", payload_type, payload6, sizeof(payload6));
+    char name6[64] = {0};
+    bool ok6 = meshcore_region_resolve_full(payload_type, payload6, sizeof(payload6), code6, name6, sizeof(name6));
+    CHECK(ok6 && !strcmp(name6, "fr-naq"), "region: 'fr-naq' (Nouvelle-Aquitaine) resolves via the generated fr-<region> set");
+
+    uint8_t payload7[3] = {1, 2, 3};
+    uint16_t code7 = ref_region_transport_code("fr-33", payload_type, payload7, sizeof(payload7));
+    char name7[64] = {0};
+    bool ok7 = meshcore_region_resolve_full(payload_type, payload7, sizeof(payload7), code7, name7, sizeof(name7));
+    CHECK(ok7 && !strcmp(name7, "fr-33"), "region: 'fr-33' (department) resolves via the generated fr-<dept> set");
+}
+
+/* Regression: the live decode path (meshcore_decoders.c) must never
+ * run the full wordlist scan synchronously -- it was found to
+ * regress decode throughput on a busy mesh in practice. Verifies the
+ * split actually works end-to-end: resolve_fast() alone must miss an
+ * unconfirmed name, meshcore_region_dict_enqueue() must hand it to
+ * the background worker, and resolve_fast() must then start hitting
+ * once the worker catches up -- proving the background path, not
+ * just resolve_full()'s matching logic in isolation, actually works. */
+static void test_region_dict_background_enqueue(void)
+{
+    uint8_t payload_type = MC_PAYLOAD_GRP_TXT;
+    uint8_t payload[7] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70};
+    /* "Test" is one of the curated built-in candidates (see
+     * REGION_CURATED_CANDIDATES, meshcore_region_dict.c) so
+     * resolve_full() -- run by the background worker -- can actually
+     * find it; a made-up name outside the wordlist would never
+     * resolve regardless of the fast/full split being tested here.
+     * Not reused by any earlier test in this file, so it starts
+     * unconfirmed. */
+    uint16_t code = ref_region_transport_code("Test", payload_type, payload, sizeof(payload));
+
+    char name[64] = {0};
+    bool fast_before = meshcore_region_resolve_fast(payload_type, payload, sizeof(payload), code, name, sizeof(name));
+    CHECK(!fast_before, "region bg: fast path misses an unconfirmed name before enqueue");
+
+    meshcore_region_dict_enqueue(payload_type, payload, sizeof(payload), code);
+
+    bool fast_after = false;
+    for (int i = 0; i < 300 && !fast_after; ++i) {
+        usleep(10000); /* 10ms */
+        memset(name, 0, sizeof(name));
+        fast_after = meshcore_region_resolve_fast(payload_type, payload, sizeof(payload), code, name, sizeof(name));
+    }
+    CHECK(fast_after, "region bg: background worker resolves the enqueued frame");
+    CHECK(fast_after && !strcmp(name, "Test"),
+          "region bg: resolved name == 'Test'");
+}
+
 int main(void)
 {
     test_advert();
     test_advert_latlon();
     test_advert_latlon_implausible();
+    test_crc2bit_trust_gate();
     test_advert_signature();
     test_grp_txt_crypto();
     test_grp_data_dispatch();
+    test_lpp_decode();
+    test_grp_data_lpp_telemetry();
     test_psk_decode();
     test_public_channel_default();
     test_hashtag_public_special_case();
@@ -703,6 +1059,8 @@ int main(void)
     test_add_channel_out_params();
     test_txt_msg_envelope();
     test_trace();
+    test_region_resolve();
+    test_region_dict_background_enqueue();
 
     if (failures) {
         fprintf(stderr, "\n%d check(s) FAILED\n", failures);

@@ -37,6 +37,10 @@ bool          opt_list_devices        = false;
 bool          opt_print_schema        = false;
 bool          opt_trusted_only        = false;
 bool          opt_crc_bruteforce      = true;
+bool          opt_crc_bruteforce_2bit = false;
+bool          opt_crc_recover         = false;
+bool          opt_region_recover      = false;
+bool          opt_telemetry_recover   = false;
 bool          opt_show_untrusted      = false;
 bool          opt_diagnostics         = false;
 deep_decode_mode_t opt_deep_decode    = DEEP_DECODE_AUTO;
@@ -167,6 +171,22 @@ void options_print_help(const char *prog)
         "  --show-untrusted       include CRC-fail/no-CRC events even when --trusted-only is set\n"
         "                         (kept off by default in deep-decode-auto mode)\n"
         "  --no-crc-bruteforce    disable single-bit CRC brute-force recovery of CRC-fail frames (on by default)\n"
+        "  --crc-bruteforce-2bit  enable two-bit CRC fallback after single-bit fails (off by default;\n"
+        "                         only trusted for MeshCore GRP_TXT/GRP_DATA/ADVERT, see ARCHITECTURE.md)\n"
+        "  --crc-recover          one-shot: retry CRC recovery against every crc_ok=0 row already\n"
+        "                         in --sqlite-db, persist any that now recover, print a report, exit\n"
+        "                         (no SDR/radio input touched; requires --sqlite-db=PATH)\n"
+        "  --region-recover       one-shot: re-resolve MeshCore region-scope names (see meshcore_region_dict.c's\n"
+        "                         wordlist) against every already-captured transport-coded row in\n"
+        "                         --sqlite-db, persist any newly-resolved name, print a report, exit\n"
+        "                         (no SDR/radio input touched; requires --sqlite-db=PATH)\n"
+        "  --telemetry-recover    one-shot: retry CayenneLPP telemetry decode (meshcore_lpp.c) against\n"
+        "                         every already-decrypted MeshCore GRP_DATA row in --sqlite-db still\n"
+        "                         missing it, persist any that now decode, print a report, exit. Needs\n"
+        "                         the row's channel loaded (--meshcore-channel plus any name already\n"
+        "                         known from history) to re-decrypt -- rows on an unloaded channel are\n"
+        "                         skipped, same limitation as --crc-recover\n"
+        "                         (no SDR/radio input touched; requires --sqlite-db=PATH)\n"
         "\n"
         "Scan-then-focus deep decode (wideband scanner always on, focused workers wake on activity):\n"
         "  --deep-decode=MODE     off | auto (default auto). 'auto' enables the focused-worker pool\n"
@@ -472,7 +492,9 @@ int options_parse(int argc, char **argv)
         O_HACKRF_LNA, O_HACKRF_VGA, O_HACKRF_AMP, O_HACKRF_AMP_OFF, O_USRP_OTW,
         O_SDRPLAY_LNA, O_SDRPLAY_AGC, O_SDRPLAY_AGC_OFF, O_SDRPLAY_AGC_SETPOINT,
         O_DECODE, O_SCAN, O_SCAN_DEC, O_ALERT_OFF_GRID, O_TRUSTED_ONLY,
-        O_SHOW_UNTRUSTED, O_DIAGNOSTICS, O_NO_CRC_BRUTEFORCE,
+        O_SHOW_UNTRUSTED, O_DIAGNOSTICS, O_NO_CRC_BRUTEFORCE, O_CRC_BRUTEFORCE_2BIT, O_CRC_RECOVER,
+        O_REGION_RECOVER,
+        O_TELEMETRY_RECOVER,
         O_DEEP_DECODE, O_FOCUS_WORKERS, O_FOCUS_HOLD_S, O_FOCUS_REWIND_MS,
         O_FOCUS_FREQS, O_FOCUS_RING_MS, O_FOCUS_MIN_SNR_DB, O_FOCUS_OS,
         O_SNAPSHOT_STORE, O_SNAPSHOT_PRE_MS, O_SNAPSHOT_POST_MS,
@@ -559,6 +581,10 @@ int options_parse(int argc, char **argv)
         { "show-untrusted",  no_argument,       NULL, O_SHOW_UNTRUSTED },
         { "diagnostics",     no_argument,       NULL, O_DIAGNOSTICS },
         { "no-crc-bruteforce", no_argument,     NULL, O_NO_CRC_BRUTEFORCE },
+        { "crc-bruteforce-2bit", no_argument, NULL, O_CRC_BRUTEFORCE_2BIT },
+        { "crc-recover",     no_argument,       NULL, O_CRC_RECOVER },
+        { "region-recover",   no_argument,       NULL, O_REGION_RECOVER },
+        { "telemetry-recover", no_argument,      NULL, O_TELEMETRY_RECOVER },
         { "deep-decode",     required_argument, NULL, O_DEEP_DECODE },
         { "focus-workers",   required_argument, NULL, O_FOCUS_WORKERS },
         { "focus-hold-s",    required_argument, NULL, O_FOCUS_HOLD_S },
@@ -766,6 +792,10 @@ int options_parse(int argc, char **argv)
         case O_SHOW_UNTRUSTED:   opt_show_untrusted = true; break;
         case O_DIAGNOSTICS:      opt_diagnostics    = true; break;
         case O_NO_CRC_BRUTEFORCE:opt_crc_bruteforce = false; break;
+        case O_CRC_BRUTEFORCE_2BIT: opt_crc_bruteforce_2bit = true; break;
+        case O_CRC_RECOVER:      opt_crc_recover = true; break;
+        case O_REGION_RECOVER:   opt_region_recover = true; break;
+    case O_TELEMETRY_RECOVER: opt_telemetry_recover = true; break;
         case O_DEEP_DECODE:
             if (!strcasecmp(optarg, "off"))       opt_deep_decode = DEEP_DECODE_OFF;
             else if (!strcasecmp(optarg, "auto")) opt_deep_decode = DEEP_DECODE_AUTO;

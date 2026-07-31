@@ -372,6 +372,7 @@ static int focused_apply_slot_locked(focused_worker_t *w)
         return -1;
     }
     lora_decoder_set_crc_bruteforce(w->dec, opt_crc_bruteforce);
+    lora_decoder_set_crc_bruteforce_2bit(w->dec, opt_crc_bruteforce_2bit);
     lora_decoder_set_callback(w->dec, focused_frame_trampoline,
                               w->frame_trampoline_ctx);
     lora_decoder_set_center_freq(w->dec, w->cur_channel_hz);

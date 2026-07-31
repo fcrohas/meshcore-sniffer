@@ -1752,6 +1752,7 @@ static int instantiate_channel(uint64_t f_hz, int bw_hz, int sf, int cr)
      * it the decoder's gr-lora_sdr-style SFO logic stays inert. */
     lora_decoder_set_center_freq(g_demods[id], (double)f_hz);
     lora_decoder_set_crc_bruteforce(g_demods[id], opt_crc_bruteforce);
+    lora_decoder_set_crc_bruteforce_2bit(g_demods[id], opt_crc_bruteforce_2bit);
     /* Stash channel id in user pointer so on_lora_frame can attribute stats. */
     lora_decoder_set_callback(g_demods[id], on_lora_frame, (void *)(intptr_t)id);
     /* Every wideband channel can promote to a focused worker via the

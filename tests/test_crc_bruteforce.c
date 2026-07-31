@@ -130,12 +130,119 @@ static void test_too_short_rejected(void)
     CHECK(!lora_crc_bruteforce_correct(tiny, 3), "byte_count < 4 is rejected");
 }
 
+static void test_two_bit_recovery(void)
+{
+    /* Small payload (10 bytes -> 80 bits, C(80,2)=3160 candidate pairs)
+     * keeps the accidental-collision odds low (~3160/65536 =~ 4.8%
+     * expected extra solutions) so byte-exact comparison against the
+     * original is a safe, deterministic assertion for this fixture. */
+    uint8_t payload[12];
+    for (int i = 0; i < 10; ++i) payload[i] = (uint8_t)(0x10 + i);
+    size_t pay_len = 10;
+
+    uint8_t frame[12];
+    memcpy(frame, payload, pay_len);
+    append_lora_crc(frame, pay_len);
+    size_t byte_count = pay_len + 2;
+
+    uint8_t original[12];
+    memcpy(original, frame, byte_count);
+
+    uint8_t corrupt[12];
+    memcpy(corrupt, frame, byte_count);
+    corrupt[2] ^= 0x08;
+    corrupt[7] ^= 0x40;
+
+    CHECK(!lora_crc_bruteforce_correct(corrupt, byte_count),
+          "two-bit corruption is not recovered by the single-bit search");
+
+    bool ok = lora_crc_bruteforce_correct_2bit(corrupt, byte_count);
+    CHECK(ok, "lora_crc_bruteforce_correct_2bit recovers a two-bit flip");
+    CHECK(memcmp(corrupt, original, byte_count) == 0,
+          "two-bit recovered bytes exactly match the original frame");
+}
+
+/* Slow O(n^3) reference: exhaustively try every pair of bit flips,
+ * recomputing the CRC from scratch each time (no linear-delta
+ * shortcut). Used only to cross-check lora_crc_bruteforce_correct_2bit's
+ * O(n) delta-based implementation on frames small enough that the
+ * exhaustive search is cheap. */
+static bool reference_2bit_search(const uint8_t *in, size_t byte_count, uint8_t *out)
+{
+    memcpy(out, in, byte_count);
+    size_t pay_len = byte_count - 2;
+    size_t n_bits = pay_len * 8;
+    uint16_t got_crc = (uint16_t)(out[byte_count - 2] |
+                                  ((uint16_t)out[byte_count - 1] << 8));
+    for (size_t i = 0; i < n_bits; ++i) {
+        out[i >> 3] ^= (uint8_t)(1u << (i & 7));
+        for (size_t j = i + 1; j < n_bits; ++j) {
+            out[j >> 3] ^= (uint8_t)(1u << (j & 7));
+            uint16_t want = lora_crc16(out, pay_len - 2);
+            want ^= out[pay_len - 1];
+            want ^= (uint16_t)out[pay_len - 2] << 8;
+            if (want == got_crc) return true;   /* leave both flips applied */
+            out[j >> 3] ^= (uint8_t)(1u << (j & 7));   /* undo j, keep i, try next j */
+        }
+        out[i >> 3] ^= (uint8_t)(1u << (i & 7));   /* undo i, try next i */
+    }
+    return false;
+}
+
+static void test_two_bit_matches_reference(void)
+{
+    /* Small enough (8 bytes -> 64 bits) that the O(n^3) reference
+     * search is cheap, across a handful of deterministic fixtures:
+     * clean, single-bit, two-bit, and three-bit corruption. */
+    struct { int a, b, c; } cases[] = {
+        { -1, -1, -1 },   /* no corruption */
+        { 3, -1, -1 },    /* single-bit */
+        { 3, 40, -1 },    /* two-bit */
+        { 3, 40, 55 },    /* three-bit -- likely (not guaranteed) unrecoverable */
+    };
+
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+        uint8_t payload[10];
+        for (int i = 0; i < 8; ++i) payload[i] = (uint8_t)(0x90 + i + (int)c);
+        size_t pay_len = 8;
+        uint8_t frame[10];
+        memcpy(frame, payload, pay_len);
+        append_lora_crc(frame, pay_len);
+        size_t byte_count = pay_len + 2;
+
+        if (cases[c].a >= 0) frame[cases[c].a >> 3] ^= (uint8_t)(1u << (cases[c].a & 7));
+        if (cases[c].b >= 0) frame[cases[c].b >> 3] ^= (uint8_t)(1u << (cases[c].b & 7));
+        if (cases[c].c >= 0) frame[cases[c].c >> 3] ^= (uint8_t)(1u << (cases[c].c & 7));
+
+        uint8_t fast_out[10];
+        memcpy(fast_out, frame, byte_count);
+        bool fast_ok = lora_crc_bruteforce_correct_2bit(fast_out, byte_count);
+
+        uint8_t ref_out[10];
+        bool ref_ok = reference_2bit_search(frame, byte_count, ref_out);
+
+        CHECK(fast_ok == ref_ok,
+              "lora_crc_bruteforce_correct_2bit existence matches the O(n^3) reference search");
+
+        if (fast_ok) {
+            size_t pl = byte_count - 2;
+            uint16_t got = (uint16_t)(fast_out[byte_count-2] | ((uint16_t)fast_out[byte_count-1] << 8));
+            uint16_t want = lora_crc16(fast_out, pl - 2);
+            want ^= fast_out[pl - 1];
+            want ^= (uint16_t)fast_out[pl - 2] << 8;
+            CHECK(got == want, "fast 2-bit result independently satisfies the CRC equation");
+        }
+    }
+}
+
 int main(void)
 {
     test_single_bit_recovery();
     test_clean_frame_untouched();
     test_double_bit_not_recovered();
     test_too_short_rejected();
+    test_two_bit_recovery();
+    test_two_bit_matches_reference();
 
     if (failures) {
         fprintf(stderr, "\n%d check(s) FAILED\n", failures);

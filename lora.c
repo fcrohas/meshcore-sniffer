@@ -367,6 +367,110 @@ bool lora_crc_bruteforce_correct(uint8_t *bytes, size_t byte_count)
     return false;
 }
 
+/* Two-bit CRC brute-force fallback: tries every pair of bit flips in
+ * bytes[0 .. byte_count-3] (the payload, not the 2-byte CRC trailer)
+ * and recomputes the CRC after each pair, same LoRa XOR-tail
+ * convention as lora_crc_bruteforce_correct() above.
+ *
+ * A naive nested-loop search is O((8*pay_len)^2) CRC recomputations --
+ * for a 140-byte payload that's ~700M elementary ops per frame, no
+ * longer "negligible against demod cost" the way the single-bit
+ * search is. CRC16 with a zero seed is linear over GF(2) (pure
+ * shift/XOR, no carries): flipping bit i always XORs the checksum by
+ * a fixed value delta_i, independent of any other flip. So instead of
+ * recomputing the CRC per candidate pair, this computes every delta_i
+ * once via a backward recurrence (delta for byte j's bit m is one
+ * LoRa-CRC byte-step applied to byte (j+1)'s delta for the same bit),
+ * hashes them into a "value -> first index" table, then for each i
+ * checks whether (delta_i ^ target) is already in the table under a
+ * different index. O(n) total, same complexity class as the
+ * single-bit search above.
+ *
+ * IMPORTANT: unlike the single-bit case, a 2-bit CRC16 match is NOT
+ * strong evidence on its own -- once the search space (~pay_len_bits
+ * choose 2) exceeds 65536, an accidental match becomes likely even
+ * when no real 2-bit-flippable error exists (measured against real
+ * CRC-fail frames: ~44% "fixed", but a control search against a
+ * random target -- simulating "no real fix exists" -- also hit
+ * ~41%). Callers MUST NOT trust a true return from this function
+ * without independent authentication of the resulting content -- see
+ * mesh_event_crc2bit_trusted() in meshcore_decoders.c, which gates on
+ * MeshCore's per-channel HMAC / ADVERT Ed25519 signature (the only
+ * checks in this codebase independent of this CRC). Restores
+ * bytes[] and returns false if no 2-bit flip recovers it. */
+bool lora_crc_bruteforce_correct_2bit(uint8_t *bytes, size_t byte_count)
+{
+    if (!bytes || byte_count < 4) return false;   /* need payload(>=2) + CRC(2) */
+
+    size_t pay_len = byte_count - 2;
+    size_t n_bits = pay_len * 8;
+    uint16_t got_crc = (uint16_t)(bytes[byte_count - 2] |
+                                  ((uint16_t)bytes[byte_count - 1] << 8));
+    uint16_t want_crc = lora_crc16(bytes, pay_len - 2);
+    want_crc ^= bytes[pay_len - 1];
+    want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
+    uint16_t target = (uint16_t)(want_crc ^ got_crc);
+    if (target == 0) return false;   /* already matches -- caller checks that first */
+
+    uint16_t *delta = malloc(n_bits * sizeof(uint16_t));
+    int      *seen  = malloc(65536 * sizeof(int));
+    if (!delta || !seen) { free(delta); free(seen); return false; }
+    for (int v = 0; v < 65536; ++v) seen[v] = -1;
+
+    /* bytes [0, pay_len-2): contribute through the crc16(bytes,pay_len-2)
+     * term. Backward recurrence: delta for byte j = STEP8(delta for
+     * byte j+1), for each of the 8 bit positions independently
+     * (STEP8 = one lora_crc16() byte-step, applied 8x, matching the
+     * inner loop of lora_crc16() itself). */
+    size_t N = pay_len - 2;   /* bytes actually fed to lora_crc16() above */
+    if (N > 0) {
+        uint16_t cur[8];
+        for (int m = 0; m < 8; ++m) {
+            uint16_t s = (uint16_t)(1u << (8 + m));
+            for (int step = 0; step < 8; ++step)
+                s = (uint16_t)((s & 0x8000) ? (s << 1) ^ 0x1021 : (s << 1));
+            cur[m] = s;
+        }
+        for (size_t j = N; j-- > 0; ) {
+            for (int m = 0; m < 8; ++m)
+                delta[j * 8 + (size_t)m] = cur[m];
+            if (j > 0) {
+                for (int m = 0; m < 8; ++m) {
+                    uint16_t s = cur[m];
+                    for (int step = 0; step < 8; ++step)
+                        s = (uint16_t)((s & 0x8000) ? (s << 1) ^ 0x1021 : (s << 1));
+                    cur[m] = s;
+                }
+            }
+        }
+    }
+    /* byte pay_len-2: XORed directly as the high byte of want_crc. */
+    for (int m = 0; m < 8; ++m)
+        delta[(pay_len - 2) * 8 + (size_t)m] = (uint16_t)(1u << (8 + m));
+    /* byte pay_len-1: XORed directly as the low byte of want_crc. */
+    for (int m = 0; m < 8; ++m)
+        delta[(pay_len - 1) * 8 + (size_t)m] = (uint16_t)(1u << m);
+
+    for (size_t i = 0; i < n_bits; ++i)
+        if (seen[delta[i]] < 0) seen[delta[i]] = (int)i;
+
+    long found_i = -1, found_j = -1;
+    for (size_t i = 0; i < n_bits; ++i) {
+        uint16_t need = (uint16_t)(delta[i] ^ target);
+        int j = seen[need];
+        if (j >= 0 && (size_t)j != i) { found_i = (long)i; found_j = j; break; }
+    }
+
+    free(seen);
+    free(delta);
+
+    if (found_i < 0) return false;
+
+    bytes[(size_t)found_i >> 3] ^= (uint8_t)(1u << (found_i & 7));
+    bytes[(size_t)found_j >> 3] ^= (uint8_t)(1u << (found_j & 7));
+    return true;
+}
+
 /* ---- Diagonal deinterleave --------------------------------------------
  *
  * Original work Copyright 2022 Tapparel Joachim @EPFL,TCL.
@@ -534,6 +638,13 @@ struct lora_decoder {
      * Defaults on in lora_decoder_create_os(); callers that want it off
      * (e.g. --no-crc-bruteforce) call lora_decoder_set_crc_bruteforce(). */
     bool         crc_bruteforce;
+    /* Two-bit CRC brute-force fallback, tried only after the single-bit
+     * search above fails. Off by default even when crc_bruteforce is on:
+     * a bare 2-bit CRC16 match collides with wrong content often enough
+     * (see lora_crc_bruteforce_correct_2bit's doc) that callers must not
+     * publish it without independent authentication -- see
+     * mesh_event_crc2bit_trusted() in meshcore_decoders.c. */
+    bool         crc_bruteforce_2bit;
 
     /* SFO/STO sub-bin tracking, gr-lora_sdr frame_sync_impl.cc port.
      * Set via lora_decoder_set_center_freq(); when 0 the SFO compensation
@@ -654,6 +765,7 @@ lora_decoder_t *lora_decoder_create_os(int sf, int cr, int bw_hz, int os_factor)
     d->os_factor = os_factor;
     d->samples_per_symbol = d->N * os_factor;
     d->crc_bruteforce = true;
+    d->crc_bruteforce_2bit = false;
 
     d->downchirp = fftwf_alloc_complex(d->N);
     d->upchirp   = fftwf_alloc_complex(d->N);
@@ -738,6 +850,18 @@ void lora_decoder_set_crc_bruteforce(lora_decoder_t *d, bool enable)
 {
     if (!d) return;
     d->crc_bruteforce = enable;
+}
+
+/* Enable/disable the two-bit CRC brute-force fallback (see
+ * lora_crc_bruteforce_correct_2bit), tried only after the single-bit
+ * search fails. Off by default; a caller enabling it must also gate
+ * acceptance of the result on independent authentication downstream
+ * (see mesh_event_crc2bit_trusted() in meshcore_decoders.c) -- a bare
+ * 2-bit CRC16 match is not trustworthy on its own. */
+void lora_decoder_set_crc_bruteforce_2bit(lora_decoder_t *d, bool enable)
+{
+    if (!d) return;
+    d->crc_bruteforce_2bit = enable;
 }
 
 void lora_decoder_destroy(lora_decoder_t *d)
@@ -1952,6 +2076,7 @@ static void state_tick(lora_decoder_t *d)
                 want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
                 d->meta.payload_crc_ok = (got_crc == want_crc);
                 d->meta.crc_corrected  = false;
+                d->meta.crc_corrected_bits = 0;
                 if (!d->meta.payload_crc_ok && d->crc_bruteforce &&
                     lora_crc_bruteforce_correct(bytes, (size_t)byte_count)) {
                     /* bytes[] now holds the corrected payload -- re-derive
@@ -1965,6 +2090,25 @@ static void state_tick(lora_decoder_t *d)
                     want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
                     d->meta.payload_crc_ok = true;
                     d->meta.crc_corrected  = true;
+                    d->meta.crc_corrected_bits = 1;
+                } else if (!d->meta.payload_crc_ok && d->crc_bruteforce &&
+                           d->crc_bruteforce_2bit &&
+                           lora_crc_bruteforce_correct_2bit(bytes, (size_t)byte_count)) {
+                    /* Same trace-dump re-derivation as the single-bit path.
+                     * payload_crc_ok/crc_corrected are set here so this
+                     * frame proceeds through decode like any other CRC
+                     * pass -- crc_corrected_bits==2 is downstream's signal
+                     * to require independent authentication (see
+                     * mesh_event_crc2bit_trusted() in meshcore_decoders.c)
+                     * before trusting/publishing it as corrected. */
+                    got_crc = (uint16_t)(bytes[byte_count-2] |
+                                        ((uint16_t)bytes[byte_count-1] << 8));
+                    want_crc = lora_crc16(bytes, pay_len - 2);
+                    want_crc ^= bytes[pay_len - 1];
+                    want_crc ^= (uint16_t)bytes[pay_len - 2] << 8;
+                    d->meta.payload_crc_ok = true;
+                    d->meta.crc_corrected  = true;
+                    d->meta.crc_corrected_bits = 2;
                 }
                 STATS_BUMP(payload_crc_present, d->sf);
                 {

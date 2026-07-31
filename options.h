@@ -74,6 +74,29 @@ extern bool          opt_trusted_only;
  * lora_crc_bruteforce_correct in lora.h/.c). Default on; --no-crc-bruteforce
  * disables it for operators who want raw CRC-fail visibility unmodified. */
 extern bool          opt_crc_bruteforce;
+/* Two-bit CRC brute-force fallback, tried only when the single-bit
+ * search above fails (see lora_crc_bruteforce_correct_2bit in
+ * lora.h/.c). Off by default: a bare 2-bit CRC16 match is not
+ * trustworthy on its own (see that function's doc), so this only
+ * benefits MeshCore GRP_TXT/GRP_DATA/ADVERT traffic, where
+ * mesh_event_crc2bit_trusted() (meshcore_decoders.c) can independently
+ * authenticate the result before it's published as corrected --
+ * --crc-bruteforce-2bit enables it. */
+extern bool          opt_crc_bruteforce_2bit;
+/* One-shot maintenance mode (see crc_recover.h): re-attempts the CRC
+ * bruteforce tiers against every already-stored, still-failing
+ * (crc_ok=0) MeshCore row in --sqlite-db, persists any that now
+ * recover (gated the same way live capture is -- see
+ * mesh_event_crc2bit_trusted()), prints a report, and exits without
+ * touching any SDR/radio input. Requires --sqlite-db=PATH. */
+extern bool          opt_crc_recover;
+/* --region-recover: one-shot, re-resolve MeshCore region-scope names
+ * (meshcore_region_dict.c) against every already-captured
+ * transport-coded row in --sqlite-db, persist any newly-resolved
+ * name, print a report, and exit without touching any SDR/radio
+ * input. Requires --sqlite-db=PATH. */
+extern bool          opt_region_recover;
+extern bool          opt_telemetry_recover;
 extern bool          opt_show_untrusted;
 extern bool          opt_diagnostics;
 
