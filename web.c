@@ -172,6 +172,13 @@ static const char DASHBOARD_HTML[] =
 "#topo-legend .l-relay{display:inline-block;width:14px;height:3px;background:#4ade80;vertical-align:middle;margin-right:3px}\n"
 "html.light #topo-canvas{background:#ffffff}\n"
 "html.light #topo-legend{background:rgba(255,255,255,0.92);color:#475569;border-color:#cbd5e1}\n"
+/* .map-legend -- Leaflet control (see initMapLegend() in the script
+ * below), styled to match #topo-legend above. line-height compacts
+ * the per-type rows (one per FRAME_TYPE_COLORS entry) since there
+ * are more of them than the Topology legend's fixed 3 lines. */
+"#map .leaflet-control.map-legend{color:#64748b;font-size:10px;line-height:15px;background:rgba(15,23,42,0.85);padding:6px 9px;border-radius:3px;border:1px solid #334155;margin:0 10px 10px 0}\n"
+"#map .map-legend .dot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin-right:4px}\n"
+"html.light #map .leaflet-control.map-legend{background:rgba(255,255,255,0.92);color:#475569;border-color:#cbd5e1}\n"
 /* Channels tab: list of channels on the left, message log (with
  * per-message routing path) for the selected channel on the right.
  * The base .tab.active{display:flex} rule already gives a flex row,
@@ -1020,6 +1027,13 @@ static const char DASHBOARD_HTML[] =
 "  }\n"
 "}\n"
 "function escHtml(s){return String(s).replace(/[&<>\"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;','\\'':'&#39;'}[c]));}\n"
+/* jsStrLit -- safely embed a runtime string as a single-quoted JS
+ * string literal inside an onclick="..." HTML attribute (which is
+ * itself double-quoted) -- escHtml() above escapes for HTML context,
+ * not JS-string context, so region names / other free text passed as
+ * inline handler arguments need this instead. null/undefined -> the
+ * bare JS literal null, not the string "null". */
+"function jsStrLit(s){ return s == null ? 'null' : \"'\" + String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,\"\\\\'\") + \"'\"; }\n"
 "let channelsRafQueued = false;\n"
 "function refreshChannels(){\n"
 "  if (channelsRafQueued) return;\n"
@@ -1296,15 +1310,30 @@ static const char DASHBOARD_HTML[] =
 "      const hex = p.route_path_hex || '';\n"
 "      const hops = [];\n"
 "      for (let i = 0; i < p.route_path_hash_count; i++) hops.push(hex.substr(i*size*2, size*2));\n"
-"      add('Route path', `${hops.join(' \\u2192 ')} <button class=btn-mini onclick=\"drawMessagePath('${hex}',${p.route_path_hash_count},${size})\">Show path</button>`);\n"
+"      add('Route path', `${hops.join(' \\u2192 ')} <button class=btn-mini onclick=\"drawMessagePath('${hex}',${p.route_path_hash_count},${size},${jsStrLit(p.region_scope===true?p.region_name:null)})\">Show path</button>`);\n"
 "    }\n"
 "    ['route_path_hex','route_path_hash_count','route_path_hash_size'].forEach(k=>shown.add(k));\n"
 "    if (p.trace_route_hashes_hex) {\n"
 "      const n = p.trace_route_hashes_hex.length / 2;\n"
-"      add('Trace route (planned hops)', `${p.trace_route_hashes_hex} <button class=btn-mini onclick=\"drawMessagePath('${p.trace_route_hashes_hex}',${n},1)\">Show path</button>`);\n"
+"      add('Trace route (planned hops)', `${p.trace_route_hashes_hex} <button class=btn-mini onclick=\"drawMessagePath('${p.trace_route_hashes_hex}',${n},1,${jsStrLit(p.region_scope===true?p.region_name:null)})\">Show path</button>`);\n"
 "      shown.add('trace_route_hashes_hex');\n"
 "    }\n"
 "    if (p.trace_snrs_hex) { add('Trace SNRs (hex, /4 dB each hop)', p.trace_snrs_hex); shown.add('trace_snrs_hex'); }\n"
+"    if (p.ctl_subtype) {\n"
+"      add('Control subtype', p.ctl_subtype);\n"
+"      add('Discovery tag', p.ctl_tag !== undefined ? '0x'+(p.ctl_tag>>>0).toString(16).padStart(8,'0') : undefined);\n"
+"      add('Discover filter', p.ctl_filter !== undefined ? '0x'+p.ctl_filter.toString(16).padStart(2,'0') : undefined);\n"
+"      add('Discover since', p.ctl_since ? fmtTime(p.ctl_since) : undefined);\n"
+"      add('Responder SNR', p.ctl_snr !== undefined ? p.ctl_snr.toFixed(1)+' dB' : undefined);\n"
+"      add('Discovered node type', p.adv_type_name);\n"
+"      ['ctl_subtype','ctl_tag','ctl_filter','ctl_since','ctl_snr','adv_type','adv_type_name'].forEach(k=>shown.add(k));\n"
+"    }\n"
+"    if (p.mc_type === 'MULTIPART') {\n"
+"      add('Multipart remaining', p.multipart_remaining);\n"
+"      add('Multipart inner type', p.multipart_inner_type);\n"
+"      add('Unwrapped ACK CRC', p.ack_crc !== undefined ? '0x'+(p.ack_crc>>>0).toString(16) : undefined);\n"
+"      ['multipart_remaining','multipart_inner_type','ack_crc'].forEach(k=>shown.add(k));\n"
+"    }\n"
 "  } else {\n"
 "    add('Port', p.port_name !== undefined ? `${p.port_name} (${p.portnum})` : undefined);\n"
 "    add('From', p.from); add('To', p.to); add('Packet id', p.packet_id);\n"
@@ -1358,32 +1387,34 @@ static const char DASHBOARD_HTML[] =
 "  applyAnalyzerFilter();\n"
 "});\n"
 "// drawMessagePath -- best-effort: resolve each path-hop-hash-hex prefix\n"
-"// against known node ids (a MeshCore path hop hash is literally a\n"
-"// leading-byte prefix of the relaying node's pubkey, matching the same\n"
-"// prefix mc_derive_from_id() uses to build the node's \"!xxxxxxxx\" id --\n"
-"// see Identity::copyHashTo in the upstream firmware). 1-3 byte hashes\n"
-"// can collide between distinct nodes; unresolved hops are reported, not\n"
-"// guessed.\n"
-"function drawMessagePath(hex, hopCount, hashSize){\n"
+"// against known node ids via resolveHopId() (see frameHopIds() below --\n"
+"// a MeshCore path hop hash is literally a leading-byte prefix of the\n"
+"// relaying node's pubkey, matching the same prefix mc_derive_from_id()\n"
+"// uses to build the node's \"!xxxxxxxx\" id -- see Identity::copyHashTo\n"
+"// in the upstream firmware). regionName (this message's resolved\n"
+"// region scope, if any) disambiguates same-prefix collisions between\n"
+"// distinct nodes; unresolved hops are reported, not guessed.\n"
+"function drawMessagePath(hex, hopCount, hashSize, regionName){\n"
 "  hashSize = hashSize || 1;\n"
 "  const hops = [];\n"
 "  for (let i = 0; i < hopCount; i++) hops.push(hex.substr(i*hashSize*2, hashSize*2).toLowerCase());\n"
 "  const pts = [];\n"
 "  let resolved = 0;\n"
 "  for (const hop of hops) {\n"
-"    let match = null;\n"
-"    for (const id of Object.keys(nodes)) {\n"
-"      if (id.length === 9 && id.slice(1, 1+hop.length) === hop) { match = id; break; }\n"
-"    }\n"
+"    const match = resolveHopId(hop, regionName);\n"
 "    if (match && markers[match]) { pts.push(markers[match].getLatLng()); resolved++; }\n"
 "  }\n"
-"  if (window.pathLine) { map.removeLayer(window.pathLine); window.pathLine = null; }\n"
 "  if (pts.length < 2) {\n"
 "    alert(`Path: ${resolved}/${hops.length} hop(s) resolved to a known position -- not enough to draw a line.`);\n"
 "    return;\n"
 "  }\n"
-"  window.pathLine = L.polyline(pts, {color:'#f59e0b', weight:3, opacity:0.85, dashArray:'6,4'}).addTo(map);\n"
-"  map.fitBounds(window.pathLine.getBounds(), {padding:[40,40]});\n"
+"  map.fitBounds(L.latLngBounds(pts), {padding:[40,40]});\n"
+/* Same traveling-beam animation as the automatic live-frame trace
+ * (animateBeamPath()/pulseNode(), defined below near placeMarker) --
+ * fires hop by hop with brief remanence and fades on its own, so no
+ * persistent-line bookkeeping (window.pathLine/pathLineTimer) is
+ * needed here anymore. */
+"  animateBeamPath(pts, '#f59e0b');\n"
 "  showTab('live');\n"
 "}\n"
 /* msgSummary -- per-port short string for the global Messages pane.
@@ -1474,6 +1505,8 @@ static const char DASHBOARD_HTML[] =
 "        return '<span class=muted>encrypted 1:1 (no content without the peer\\'s key)</span>';\n"
 "      case 'TRACE':\n"
 "        return (typeof p.path_hop_count === 'number') ? `${p.path_hop_count} hops` : '\\u2014';\n"
+"      case 'CONTROL':\n"
+"        return null;\n"  /* NODE_DISCOVER_RESP already lands in the Discoveries pane */
 "      default:\n"
 "        return p.text ? escHtml(p.text) : '\\u2014';\n"
 "    }\n"
@@ -1598,6 +1631,26 @@ static const char DASHBOARD_HTML[] =
 "  sensor:   {radius:6, color:'#fff', weight:2, fillColor:'#ef4444', fillOpacity:1},\n"
 "  people:   {radius:6, color:'#fff', weight:2, fillColor:'#3b82f6', fillOpacity:1},\n"
 "};\n"
+/* nodeRadiusForZoom -- shrinks circle-marker nodes as the map zooms
+ * out, down to a MIN_SCALE floor so a dot never disappears entirely.
+ * Unchanged (returns base) at/above REF_ZOOM, so the normal working
+ * zoom range looks exactly like it did before this existed. */
+"function nodeRadiusForZoom(base) {\n"
+"  const REF_ZOOM = 12, MIN_SCALE = 0.35;\n"
+"  const z = map.getZoom();\n"
+"  if (z >= REF_ZOOM) return base;\n"
+"  const scale = Math.max(MIN_SCALE, 1 - (REF_ZOOM - z) * 0.08);\n"
+"  return Math.max(2, base * scale);\n"
+"}\n"
+/* currentNodeStyle -- NODE_STYLES[kind] with radius swapped for the
+ * current zoom-scaled value (see nodeRadiusForZoom() above). Used
+ * anywhere a marker's "resting" style is set/restored (placeMarker(),
+ * blinkRepeater()'s post-blink restore, the zoomend handler below) so
+ * none of them can drift out of sync with each other. */
+"function currentNodeStyle(kind) {\n"
+"  const s = NODE_STYLES[kind] || NODE_STYLES.repeater;\n"
+"  return {...s, radius: nodeRadiusForZoom(s.radius)};\n"
+"}\n"
 "const REPEATER_BLINK_STYLE = {radius:7, color:'#fff', weight:2, fillColor:'#22c55e', fillOpacity:1};\n"
 "const ROOM_ICON = L.divIcon({\n"
 "  className: 'room-marker-icon',\n"
@@ -1641,7 +1694,7 @@ static const char DASHBOARD_HTML[] =
 "    if (existing._kind === kind) { existing.setLatLng(ll); return existing; }\n"
 "    map.removeLayer(existing);\n"
 "  }\n"
-"  const marker = kind === 'room' ? L.marker(ll, {icon: ROOM_ICON}) : L.circleMarker(ll, NODE_STYLES[kind]);\n"
+"  const marker = kind === 'room' ? L.marker(ll, {icon: ROOM_ICON}) : L.circleMarker(ll, currentNodeStyle(kind));\n"
 "  marker._kind = kind;\n"
 /* Clicking a marker opens the same drawer a node-list row click does
  * (openDrawer(id), see renderNodes()) instead of Leaflet's default
@@ -1653,69 +1706,193 @@ static const char DASHBOARD_HTML[] =
 "  markers[id] = marker;\n"
 "  return marker;\n"
 "}\n"
+/* Live-rescale every already-placed circle-marker node as the user
+ * zooms (see nodeRadiusForZoom()/currentNodeStyle() above) -- without
+ * this, only NEWLY placed markers would pick up the new zoom's size,
+ * leaving everything already on the map stuck at whatever size it
+ * was created at. Room markers (L.Marker+divIcon, no .setRadius) are
+ * skipped -- fixed-size square icon, out of scope here. */
+"map.on('zoomend', () => {\n"
+"  for (const id of Object.keys(markers)) {\n"
+"    const m = markers[id];\n"
+"    if (m.setRadius && m._kind) m.setRadius(nodeRadiusForZoom(NODE_STYLES[m._kind] ? NODE_STYLES[m._kind].radius : NODE_STYLES.repeater.radius));\n"
+"  }\n"
+"});\n"
 "document.getElementById('showNodeIdLabels').addEventListener('change', () => {\n"
 "  for (const id of Object.keys(markers)) updateNodeIdLabel(markers[id], id);\n"
 "});\n"
 /* blinkRepeater -- 10s green blink on a repeater/sensor marker relaying
  * a live frame (see traceLivePath() below). No-op for markers with no
  * .setStyle() (rooms use L.Marker+divIcon, which has none). Restores
- * the marker's own kind style (NODE_STYLES[m._kind]) when the blink
- * ends, not a hardcoded repeater red, so a people-kind marker that
- * happens to resolve as a hop blinks back to blue rather than staying
- * red. Re-triggering while already blinking restarts the 10s window
+ * the marker's own kind style at its current zoom-scaled size
+ * (currentNodeStyle(m._kind), see nodeRadiusForZoom() above) when the
+ * blink ends, not a hardcoded repeater red at a fixed radius, so a
+ * people-kind marker that happens to resolve as a hop blinks back to
+ * blue at the right size instead of popping back to full size.
+ * Re-triggering while already blinking restarts the 10s window
  * instead of stacking timers, so a busy repeater just stays lit
  * rather than flickering from overlapping timeouts. */
 "function blinkRepeater(id) {\n"
 "  const m = markers[id];\n"
 "  if (!m || !m.setStyle) return;\n"
-"  const baseStyle = NODE_STYLES[m._kind] || NODE_STYLES.repeater;\n"
+"  const baseStyle = currentNodeStyle(m._kind);\n"
 "  if (m._blinkTimer) clearInterval(m._blinkTimer);\n"
 "  if (m._blinkTimeout) clearTimeout(m._blinkTimeout);\n"
 "  let on = false;\n"
 "  m._blinkTimer = setInterval(() => { on = !on; m.setStyle(on ? REPEATER_BLINK_STYLE : baseStyle); }, 400);\n"
 "  m._blinkTimeout = setTimeout(() => { clearInterval(m._blinkTimer); m._blinkTimer = null; m.setStyle(baseStyle); }, 10000);\n"
 "}\n"
+/* resolveHopId -- match a path-hop-hash-hex prefix (1-3 bytes) against
+ * known node ids. A short prefix can collide between distinct nodes
+ * ANYWHERE on the map, not just locally, so when the frame carries a
+ * resolved region scope (regionName, see meshcore_region_dict.c /
+ * "Region scoping" in the node drawer), a candidate that's actually
+ * been SEEN using that same scope (n.regionScopes[regionName]) wins
+ * over an arbitrary same-prefix node elsewhere in the world. Falls
+ * back to the first prefix match (previous behavior) when there's no
+ * region info to disambiguate with, or no in-scope candidate exists. */
+"function resolveHopId(hop, regionName) {\n"
+"  let fallback = null;\n"
+"  for (const id of Object.keys(nodes)) {\n"
+"    if (id.length !== 9 || id.slice(1, 1 + hop.length) !== hop) continue;\n"
+"    if (!fallback) fallback = id;\n"
+"    if (regionName && nodes[id].regionScopes && nodes[id].regionScopes[regionName]) return id;\n"
+"  }\n"
+"  return fallback;\n"
+"}\n"
 /* frameHopIds -- best-effort list of known node ids (path order) that
  * relayed this frame, for traceLivePath() below. Meshtastic
  * ROUTING_APP/TRACEROUTE_APP already carries full ids (p.route);
  * MeshCore only ever carries 1-3 byte hash prefixes (route_path_hex,
  * or trace_route_hashes_hex for TRACE -- see feed_meshcore_json.c),
- * resolved the same leading-prefix-match way drawMessagePath() (above)
- * does. Hash collisions between distinct nodes are possible for short
- * prefixes; unresolved hops are dropped rather than guessed. */
+ * resolved via resolveHopId() above (region-scope-aware, same
+ * leading-prefix-match logic drawMessagePath() (above) uses).
+ * Unresolved hops are dropped rather than guessed. */
 "function frameHopIds(p) {\n"
 "  if (p.route && p.route.length) return p.route.filter(id => nodes[id]);\n"
 "  let hex = null, hashSize = 1, hopCount = 0;\n"
 "  if (p.trace_route_hashes_hex) { hex = p.trace_route_hashes_hex; hopCount = hex.length / 2; }\n"
 "  else if (p.route_path_hex) { hex = p.route_path_hex; hashSize = p.route_path_hash_size || 1; hopCount = p.route_path_hash_count || 0; }\n"
 "  if (!hex || !hopCount) return [];\n"
+"  const regionName = p.region_scope === true ? p.region_name : null;\n"
 "  const ids = [];\n"
 "  for (let i = 0; i < hopCount; i++) {\n"
-"    const hop = hex.substr(i * hashSize * 2, hashSize * 2).toLowerCase();\n"
-"    let match = null;\n"
-"    for (const id of Object.keys(nodes)) {\n"
-"      if (id.length === 9 && id.slice(1, 1 + hop.length) === hop) { match = id; break; }\n"
-"    }\n"
+"    const match = resolveHopId(hex.substr(i * hashSize * 2, hashSize * 2).toLowerCase(), regionName);\n"
 "    if (match) ids.push(match);\n"
 "  }\n"
 "  return ids;\n"
 "}\n"
 /* FRAME_TYPE_COLORS -- live path-trace line color per frame type
  * (mc_type for MeshCore, port_name for Meshtastic); unlisted types
- * fall back to the same amber drawMessagePath() (above) uses for its
- * operator-triggered path line, for visual consistency. */
+ * (Meshtastic ports, RAW_CUSTOM, etc.) fall back to the same amber
+ * drawMessagePath() (above) uses for its operator-triggered path
+ * line. One entry per type so the map legend (built from this same
+ * object, see initMapLegend() below) never drifts out of sync with
+ * what a beam actually renders. */
 "const FRAME_TYPE_COLORS = {\n"
-"  ADVERT: '#38bdf8', GRP_TXT: '#a78bfa', GRP_DATA: '#f472b6', TRACE: '#fbbf24',\n"
-"  ACK: '#94a3b8', TXT_MSG: '#fb923c', REQ: '#f87171', RESPONSE: '#f87171',\n"
-"  PATH: '#f87171', ANON_REQ: '#f87171',\n"
+"  ADVERT: '#38bdf8', GRP_TXT: '#a78bfa', GRP_DATA: '#f472b6', TRACE: '#2dd4bf',\n"
+"  ACK: '#94a3b8', TXT_MSG: '#fb923c', REQ: '#f87171', RESPONSE: '#fb7185',\n"
+"  PATH: '#4ade80', ANON_REQ: '#22d3ee', CONTROL: '#facc15', MULTIPART: '#818cf8',\n"
 "};\n"
-/* traceLivePath -- automatic per-frame relay visualization: draws the
- * resolved hop path as a line (color by frame type, see
- * FRAME_TYPE_COLORS) and blinks every resolved repeater hop green for
- * 10s (blinkRepeater()), the line itself fading out after the same
- * 10s. Distinct from drawMessagePath() (above), the operator-triggered
- * single-path lookup from a past message row, which persists on the
- * map until superseded by another manual lookup.
+"const FRAME_TYPE_COLOR_OTHER = '#f59e0b';\n"
+/* initMapLegend -- small always-on corner overlay (Leaflet control, so
+ * it stacks correctly with the default zoom/attribution controls and
+ * never intercepts map drag/scroll -- see disableClickPropagation)
+ * listing every color a live path-trace beam (animateBeamPath(),
+ * below) can render, generated directly from FRAME_TYPE_COLORS so it
+ * can never list a color the map itself doesn't use. */
+"function initMapLegend(){\n"
+"  const ctl = L.control({position: 'bottomright'});\n"
+"  ctl.onAdd = function(){\n"
+"    const div = L.DomUtil.create('div', 'leaflet-control map-legend');\n"
+"    const rows = Object.entries(FRAME_TYPE_COLORS).map(([type, color]) =>\n"
+"      `<span class=dot style=\"background:${color}\"></span>${type}`);\n"
+"    rows.push(`<span class=dot style=\"background:${FRAME_TYPE_COLOR_OTHER}\"></span>Other`);\n"
+"    div.innerHTML = rows.join('<br>');\n"
+"    L.DomEvent.disableClickPropagation(div);\n"
+"    L.DomEvent.disableScrollPropagation(div);\n"
+"    return div;\n"
+"  };\n"
+"  ctl.addTo(map);\n"
+"}\n"
+"initMapLegend();\n"
+/* pulseNode -- two staggered expanding-RING pulses (unfilled circle
+ * outline, not a filled dot -- fill:false) at a resolved hop's
+ * position, colored to match the beam instead of a fixed-color marker
+ * blink (see NODE_STYLES-based blinkRepeater() above, still used by
+ * the Nodes-table row click -- this is a separate, path-colored
+ * effect). Each ring grows from a small radius to a fixed max and
+ * fades out as it grows, then is removed. Screen-space radius
+ * (L.circleMarker), so a ring looks the same size at any zoom level. */
+"function pulseNode(ll, color) {\n"
+"  for (let k = 0; k < 2; k++) {\n"
+"    setTimeout(() => {\n"
+"      const dur = 1250, maxR = 22;\n"
+"      const c = L.circleMarker(ll, {radius:3, color, weight:2, fill:false, opacity:0.9}).addTo(map);\n"
+"      const start = performance.now();\n"
+"      function step(now) {\n"
+"        const t = Math.min(1, (now - start) / dur);\n"
+"        c.setRadius(3 + t * (maxR - 3));\n"
+"        c.setStyle({opacity: 0.9 * (1 - t)});\n"
+"        if (t < 1) { requestAnimationFrame(step); return; }\n"
+"        map.removeLayer(c);\n"
+"      }\n"
+"      requestAnimationFrame(step);\n"
+"    }, k * 380);\n"
+"  }\n"
+"}\n"
+/* fireSegment -- a short traveling chunk of beam (a head + trailing
+ * tail, not the whole a-to-b line lit up at once) sliding from a to b
+ * over travelMs, then a brief fade once it reaches b. Reads as a bolt
+ * moving THROUGH the hop rather than the entire hop flashing on and
+ * off as one static piece. */
+"function fireSegment(a, b, color, travelMs) {\n"
+"  const trailFrac = 0.28;\n"
+"  const line = L.polyline([a, a], {color, weight:3, opacity:0.9}).addTo(map);\n"
+"  const start = performance.now();\n"
+"  function step(now) {\n"
+"    const t = Math.min(1, (now - start) / travelMs);\n"
+"    const tailT = Math.max(0, t - trailFrac);\n"
+"    const head = L.latLng(a.lat + (b.lat - a.lat) * t, a.lng + (b.lng - a.lng) * t);\n"
+"    const tail = L.latLng(a.lat + (b.lat - a.lat) * tailT, a.lng + (b.lng - a.lng) * tailT);\n"
+"    line.setLatLngs([tail, head]);\n"
+"    if (t < 1) { requestAnimationFrame(step); return; }\n"
+"    const fadeMs = 200;\n"
+"    const fadeStart = performance.now();\n"
+"    function fade(now2) {\n"
+"      const ft = Math.min(1, (now2 - fadeStart) / fadeMs);\n"
+"      line.setStyle({opacity: 0.9 * (1 - ft)});\n"
+"      if (ft < 1) { requestAnimationFrame(fade); return; }\n"
+"      map.removeLayer(line);\n"
+"    }\n"
+"    requestAnimationFrame(fade);\n"
+"  }\n"
+"  requestAnimationFrame(step);\n"
+"}\n"
+/* animateBeamPath -- fires each hop's traveling chunk (fireSegment())
+ * so it slides from one node to the next over that hop's pacing, and
+ * pulses each node (pulseNode()) right as the beam actually arrives
+ * there -- not when the segment starts, so the pulse stays in sync
+ * with the moving beam instead of firing a whole hop early. Per-hop
+ * pacing is capped so a many-hop route still animates in a reasonable
+ * total time. */
+"function animateBeamPath(pts, color) {\n"
+"  const segs = pts.length - 1;\n"
+"  const perHopMs = Math.max(500, Math.min(900, 7200 / segs));\n"
+"  for (let i = 0; i <= segs; i++) {\n"
+"    setTimeout(() => pulseNode(pts[i], color), i * perHopMs);\n"
+"  }\n"
+"  for (let i = 0; i < segs; i++) {\n"
+"    setTimeout(() => fireSegment(pts[i], pts[i + 1], color, perHopMs), i * perHopMs);\n"
+"  }\n"
+"}\n"
+/* traceLivePath -- automatic per-frame relay visualization: animates
+ * the resolved hop path as a traveling beam (color by frame type, see
+ * FRAME_TYPE_COLORS and animateBeamPath() above), one hop segment at a
+ * time, pulsing each node as the beam reaches it. Distinct from
+ * drawMessagePath() (above), the operator-triggered single-path
+ * lookup from a past message row, which draws its line immediately
+ * and lets it persist rather than animating hop by hop.
  *
  * Skips anything older than a few seconds: db_sqlite_replay_recent()
  * (--history-replay-hours, default 24h) pushes historical rows through
@@ -1727,12 +1904,15 @@ static const char DASHBOARD_HTML[] =
 "function traceLivePath(p) {\n"
 "  if (Date.now()/1000 - p.ts > 5) return;\n"
 "  const ids = frameHopIds(p);\n"
-"  for (const id of ids) blinkRepeater(id);\n"
-"  const pts = ids.map(id => (markers[id] && markers[id].getLatLng) ? markers[id].getLatLng() : null).filter(Boolean);\n"
-"  if (pts.length < 2) return;\n"
-"  const color = FRAME_TYPE_COLORS[p.mc_type || p.port_name] || '#f59e0b';\n"
-"  const line = L.polyline(pts, {color, weight:3, opacity:0.9}).addTo(map);\n"
-"  setTimeout(() => map.removeLayer(line), 10000);\n"
+"  const hops = [];\n"
+"  for (const id of ids) {\n"
+"    const m = markers[id];\n"
+"    if (m && m.getLatLng) hops.push(m.getLatLng());\n"
+"  }\n"
+"  if (!hops.length) return;\n"
+"  const color = FRAME_TYPE_COLORS[p.mc_type || p.port_name] || FRAME_TYPE_COLOR_OTHER;\n"
+"  if (hops.length < 2) { pulseNode(hops[0], color); return; }\n"
+"  animateBeamPath(hops, color);\n"
 "}\n"
 "// Mesh edge: draw a line from src node to dst node when both are positioned.\n"
 "// Used for relay_node hints and NEIGHBORINFO entries. SNR scales opacity.\n"
@@ -1927,7 +2107,7 @@ static const char DASHBOARD_HTML[] =
 "      : ((m.summary===null || m.summary===undefined) ? '<span class=muted>\\u2014</span>' : m.summary);\n"
 "    const pathTitle = m.path ? ` title=\"${escHtml(m.path)}\"` : '';\n"
 "    const hopLabel = m.pathHopCount > 0 ? `${m.pathHopCount} hop${m.pathHopCount===1?'':'s'}` : 'path';\n"
-"    const pathBtn = m.pathHex ? ` <button class=btn-mini${pathTitle} onclick=\"drawMessagePath('${m.pathHex}',${m.pathHopCount},${m.pathHashSize})\">${hopLabel}</button>` : '';\n"
+"    const pathBtn = m.pathHex ? ` <button class=btn-mini${pathTitle} onclick=\"drawMessagePath('${m.pathHex}',${m.pathHopCount},${m.pathHashSize},${jsStrLit(m.regionScope?m.regionName:null)})\">${hopLabel}</button>` : '';\n"
 "    const pathHint = (!m.pathHex && m.path) ? `<span class=chat-path>${escHtml(m.path)}</span>` : '';\n"
 /* Region-scope badge (v1.10+ MeshCore flood scoping): shown next to
  * the sender name when this message's packet carried transport
@@ -2617,11 +2797,13 @@ static const char DASHBOARD_HTML[] =
 "  // 'from' of their own but still traversed real repeaters. See\n"
 "  // topoNoteRelayPath() below.\n"
 "  topoNoteRelayPath(p);\n"
-/* Live map: flash the same relay path across the Leaflet map itself
- * (traceLivePath(), defined above near placeMarker/blinkRepeater) --
- * a colored line by frame type plus a 10s green blink on every
- * resolved repeater hop. Independent of topoNoteRelayPath() above
- * (that's the Topology tab's force-directed graph, a different view). */
+/* Live map: animate the same relay path across the Leaflet map itself
+ * (traceLivePath(), defined above near placeMarker/pulseNode) -- a
+ * beam (colored by frame type) that fires hop by hop with brief
+ * remanence, plus a matching-color ring pulse on every resolved
+ * repeater hop as the beam reaches it. Independent of
+ * topoNoteRelayPath() above (that's the Topology tab's force-directed
+ * graph, a different view). */
 "  traceLivePath(p);\n"
 "  // Per-channel stats: bucket by channel_hash so unknown networks are visible too.\n"
 "  if (p.channel_hash !== undefined){\n"
@@ -2736,6 +2918,7 @@ static const char DASHBOARD_HTML[] =
 "  if (summary) pushTo(msgsEl, `${focusedBadge}<b>${msgFromLabel(p,n,id)}</b> <span class=muted>${p.channel_name||''}</span> <span class=port>${p.port_name||''}</span>: ${summary}`, p.ts);\n"
 "  if (p.channel_hash !== undefined) { noteChannelMessage(chanKey(p.channel_hash, p.channel_name), p, summary); refreshChannelsTab(); }\n"
 "  if (p.atak_callsign) pushTo(discEl, `<span class=atak>ATAK ${p.atak_callsign} (${p.atak_team}/${p.atak_role})${p.atak_chat?' chat: '+p.atak_chat:''}</span>`, p.ts);\n"
+"  if (p.mc_type === 'CONTROL' && p.ctl_subtype === 'NODE_DISCOVER_RESP') pushTo(discEl, `<span class=disc>discovery: ${escHtml(n.name || id)}</span>`, p.ts);\n"
 "  noteNodeFrame(id, p);\n"
 "  evictNodes();\n"
 "  refreshNodes();\n"
