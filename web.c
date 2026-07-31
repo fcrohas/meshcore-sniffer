@@ -43,6 +43,10 @@ extern int       app_add_runtime_extra_freq(uint64_t f_hz, int bw_hz, int sf, in
 #define HISTORY_RING_SIZE  1024  /* recent events replayed to new SSE clients */
 #define API_MESSAGES_DEFAULT_LIMIT 100  /* GET /api/messages default row count */
 #define API_MESSAGES_MAX_LIMIT     500  /* GET /api/messages hard cap */
+#define API_NODE_HISTORY_DEFAULT_LIMIT 300  /* GET /api/node-history default row count */
+#define API_NODE_HISTORY_MAX_LIMIT     1000 /* GET /api/node-history hard cap */
+#define API_TELEMETRY_DEFAULT_LIMIT 200  /* GET /api/telemetry default row count */
+#define API_TELEMETRY_MAX_LIMIT     1000 /* GET /api/telemetry hard cap */
 
 static int  g_listen_fd = -1;
 static int  g_sse_fds[MAX_SSE_CLIENTS];
@@ -537,8 +541,14 @@ static const char DASHBOARD_HTML[] =
 "      <select id=\"analyzer-filter-protocol\"><option value=\"\">All protocols</option><option value=\"meshcore\">MeshCore</option><option value=\"meshtastic\">Meshtastic</option></select>\n"
 "      <select id=\"analyzer-filter-crc\"><option value=\"\">All CRC</option><option value=\"ok\">CRC ok</option><option value=\"corrected\">CRC corrected</option><option value=\"fail\">CRC fail</option></select>\n"
 "    </div>\n"
-"    <table id=\"analyzertbl\"><thead><tr><th></th><th>Time</th><th>Protocol</th><th>Type</th><th>Node</th><th>Channel</th><th>CRC</th><th>SNR</th><th>Frame (hex)</th></tr></thead><tbody></tbody></table>\n"
+"    <table id=\"analyzertbl\"><thead><tr><th></th><th>Time</th><th>Protocol</th><th>Type</th><th>Node</th><th>Channel</th><th>Scope</th><th>Hops</th><th>CRC</th><th>SNR</th><th>Frame (hex)</th></tr></thead><tbody></tbody></table>\n"
 "    <div id=\"analyzer-empty\" class=\"empty-hint\">Waiting for frames...</div>\n"
+"  </div>\n"
+"</div>\n"
+"<div id=\"telemetry\" class=\"tab\">\n"
+"  <div class=\"pane\" style=\"width:100%\"><h2>Telemetry <span class=muted>MeshCore GRP_DATA readings, decoded as CayenneLPP -- best effort, no sender identity (channel-scoped only)</span></h2>\n"
+"    <table id=\"telemetrytbl\"><thead><tr><th>Time</th><th>Channel</th><th>Sensor</th><th>Value</th></tr></thead><tbody></tbody></table>\n"
+"    <div id=\"telemetry-empty\" class=\"empty-hint\">No telemetry decoded yet -- waiting for a GRP_DATA frame whose blob parses as CayenneLPP.</div>\n"
 "  </div>\n"
 "</div>\n"
 "<aside id=\"drawer\" aria-hidden=\"true\">\n"
@@ -664,6 +674,50 @@ static const char DASHBOARD_HTML[] =
  * CHAN_SNR SSE events; renderChannels() averages buckets across the
  * slots that map to each channel hash. */
 "const chanSnr = {};\n"
+/* Network-wide region-scope (v1.10+ MeshCore flood scoping) baseline,
+ * used by the repeater drawer's no-scope warning: if the network as a
+ * whole uses region scoping meaningfully but a specific repeater's
+ * own traffic mostly doesn't, that's flagged as a likely
+ * misconfiguration. Per-node scope usage is tracked on nodes[id]
+ * (regionScopedCount/regionUnscopedCount/regionScopes) in es.onmessage. */
+"const regionStats = {scoped:0, unscoped:0};\n"
+/* Telemetry tab: best-effort CayenneLPP decode of MeshCore GRP_DATA
+ * blobs (meshcore_lpp.c). Channel-scoped only -- GRP_DATA carries no
+ * sender identity, so unlike the Nodes/Analyzer tabs there is no
+ * per-node aggregation here, just a flat newest-first reading log. */
+"const TELEMETRY_MAX = 300;\n"
+"function telemetryValueText(rec){\n"
+"  if (Array.isArray(rec.value)) return rec.value.map(v=>v.toFixed(3)).join(', ');\n"
+"  return (typeof rec.value === 'number' ? rec.value.toFixed(3) : String(rec.value)) + (rec.unit||'');\n"
+"}\n"
+"function telemetryRowHtml(p, rec){\n"
+"  const chan = p.channel_name || ('0x'+(p.channel_hash||0).toString(16).padStart(2,'0'));\n"
+"  return `<tr><td class=ts>${fmtTime(p.ts)}</td><td>#${escHtml(chan)}</td><td>${escHtml(rec.name||'?')}</td><td>${escHtml(telemetryValueText(rec))}</td></tr>`;\n"
+"}\n"
+"function addTelemetryRows(p){\n"
+"  if (!Array.isArray(p.telemetry) || !p.telemetry.length) return;\n"
+"  const tbody = document.querySelector('#telemetrytbl tbody');\n"
+"  if (!tbody) return;\n"
+"  let html = '';\n"
+"  for (const rec of p.telemetry) html += telemetryRowHtml(p, rec);\n"
+"  tbody.insertAdjacentHTML('afterbegin', html);\n"
+"  while (tbody.rows.length > TELEMETRY_MAX) tbody.deleteRow(tbody.rows.length - 1);\n"
+"  document.getElementById('telemetry-empty').style.display = 'none';\n"
+"}\n"
+"async function fetchTelemetry(){\n"
+"  try {\n"
+"    const r = await fetch('/api/telemetry?limit=200');\n"
+"    const j = await r.json();\n"
+"    const tbody = document.querySelector('#telemetrytbl tbody');\n"
+"    let html = '';\n"
+"    for (const p of (j.telemetry||[])) {\n"
+"      if (!Array.isArray(p.telemetry)) continue;\n"
+"      for (const rec of p.telemetry) html += telemetryRowHtml(p, rec);\n"
+"    }\n"
+"    tbody.innerHTML = html;\n"
+"    document.getElementById('telemetry-empty').style.display = html ? 'none' : '';\n"
+"  } catch(_) {}\n"
+"}\n"
 "const nodesCount = document.getElementById('nodes-count');\n"
 "const nodesSearch = document.getElementById('nodes-search');\n"
 "// LRU cap on the nodes map. Busy environments produce hundreds of\n"
@@ -2351,15 +2405,19 @@ static const char DASHBOARD_HTML[] =
  * like it silently failed. Drop the cache and, if this channel is
  * currently open, immediately re-pull it the same way that button
  * does. */
-"      delete channels[h]._msgs;\n"
-"      delete channels[h]._older;\n"
-"      delete channels[h]._olderDone;\n"
+"      delete channels[key]._msgs;\n"
+"      delete channels[key]._older;\n"
+"      delete channels[key]._olderDone;\n"
 "      refreshChannels();\n"
 "      refreshChannelsTab();\n"
-"      if (selectedChannelHash === h) { renderChannelMessages(); loadOlderMessages(); }\n"
+"      if (selectedChannelHash === key) { renderChannelMessages(); loadOlderMessages(); }\n"
 "    }\n"
 "    return;\n"
 "  }\n"
+"  // GRP_DATA best-effort CayenneLPP decode (meshcore_lpp.c) -- channel-\n"
+"  // scoped only, no sender identity, so this is independent of the\n"
+"  // p.from-gated node bookkeeping below.\n"
+"  if (Array.isArray(p.telemetry) && p.telemetry.length) addTelemetryRows(p);\n"
 "  if (p.event === 'OFF_GRID_LORA') {\n"
 "    // Promote button: POSTs to /api/extra-freq to add a real decoder\n"
 "    // slot at the discovered frequency. BW guess uses the scanner's\n"
@@ -3341,6 +3399,55 @@ static void handle_api_messages(int fd, const char *req)
     if (channel_hash < 0) { send_response(fd, 400, "{\"error\":\"missing channel\"}"); return; }
 
     char *body = db_sqlite_query_messages_json((uint32_t)channel_hash, before_ts, (int)limit);
+    if (!body) { send_response(fd, 503, "{\"error\":\"sqlite not configured\"}"); return; }
+    send_response(fd, 200, body);
+    free(body);
+}
+
+/* GET /api/node-history?id=<!xxxxxxxx>&before=<ts>&limit=<n> -- on-demand
+ * repeater/node drawer history, bypassing the SSE history ring and the
+ * frontend's live-traffic-only nodes[id]._hist entirely so depth is
+ * bounded only by what's in the SQLite DB (see
+ * db_sqlite_query_node_events_json). */
+static void handle_api_node_history(int fd, const char *req)
+{
+    char qs[512] = {0}, idbuf[32] = {0}, beforebuf[32] = {0}, limbuf[16] = {0};
+    extract_query_string(req, qs, sizeof(qs));
+
+    double before_ts = 0.0;
+    long limit = API_NODE_HISTORY_DEFAULT_LIMIT;
+    query_get(qs, "id", idbuf, sizeof(idbuf));
+    if (query_get(qs, "before", beforebuf, sizeof(beforebuf))) before_ts = atof(beforebuf);
+    if (query_get(qs, "limit", limbuf, sizeof(limbuf))) limit = strtol(limbuf, NULL, 10);
+    if (limit <= 0) limit = API_NODE_HISTORY_DEFAULT_LIMIT;
+    if (limit > API_NODE_HISTORY_MAX_LIMIT) limit = API_NODE_HISTORY_MAX_LIMIT;
+    if (!idbuf[0]) { send_response(fd, 400, "{\"error\":\"missing id\"}"); return; }
+
+    char *body = db_sqlite_query_node_events_json(idbuf, before_ts, (int)limit);
+    if (!body) { send_response(fd, 503, "{\"error\":\"sqlite not configured\"}"); return; }
+    send_response(fd, 200, body);
+    free(body);
+}
+
+/* GET /api/telemetry?before=<ts>&limit=<n> -- Telemetry tab bootstrap/
+ * scroll-back. MeshCore GRP_TXT/GRP_DATA carries no sender identity
+ * (see feed_meshcore_json.c), so unlike /api/messages there is no
+ * per-node or per-channel filter here -- just the global newest-first
+ * feed of every GRP_DATA row whose blob decoded as CayenneLPP (see
+ * db_sqlite_query_telemetry_json). */
+static void handle_api_telemetry(int fd, const char *req)
+{
+    char qs[512] = {0}, beforebuf[32] = {0}, limbuf[16] = {0};
+    extract_query_string(req, qs, sizeof(qs));
+
+    double before_ts = 0.0;
+    long limit = API_TELEMETRY_DEFAULT_LIMIT;
+    if (query_get(qs, "before", beforebuf, sizeof(beforebuf))) before_ts = atof(beforebuf);
+    if (query_get(qs, "limit", limbuf, sizeof(limbuf))) limit = strtol(limbuf, NULL, 10);
+    if (limit <= 0) limit = API_TELEMETRY_DEFAULT_LIMIT;
+    if (limit > API_TELEMETRY_MAX_LIMIT) limit = API_TELEMETRY_MAX_LIMIT;
+
+    char *body = db_sqlite_query_telemetry_json(before_ts, (int)limit);
     if (!body) { send_response(fd, 503, "{\"error\":\"sqlite not configured\"}"); return; }
     send_response(fd, 200, body);
     free(body);
