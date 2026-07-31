@@ -388,4 +388,41 @@ db_sqlite_telemetry_candidate_row_t *db_sqlite_query_telemetry_candidates(size_t
 bool db_sqlite_apply_telemetry_recover(int64_t id, const char *telemetry_json,
                                        const char *json, size_t json_len);
 
+/* Retroactive CONTROL node-discovery resolution support (see
+ * meshcore_control_recover.c): meshcore_decoders.c's decode_control()
+ * (NODE_DISCOVER_REQ/_RESP -- an application convention, see
+ * MC_CTL_TYPE_NODE_DISCOVER_REQ in meshcore.h) was added after this DB
+ * may already hold CONTROL rows stored with decrypted=0 from the old
+ * decode_unknown() fallback. Unlike telemetry/CRC/region recovery,
+ * this needs no channel keys or wordlist -- CONTROL's structure (when
+ * it matches the convention at all) is fully cleartext, so a re-parse
+ * of raw_hex is all that's needed. */
+
+typedef struct {
+    int64_t id;
+    double  ts;
+    int     sf, cr, bw_hz;
+    double  rssi_db, snr_db;
+    char    raw_hex[513]; /* matches mesh_event_t.raw_hex (mesh_packet.h) */
+} db_sqlite_control_candidate_row_t;
+
+/* Every still-undecrypted (decrypted=0) MeshCore CONTROL row, as a
+ * malloc'd array of *out_n entries (caller frees). Rows with no
+ * raw_hex (shouldn't happen, but guarded) are skipped. NULL and
+ * *out_n=0 if db_sqlite_init() wasn't called/failed, or nothing
+ * matches. */
+db_sqlite_control_candidate_row_t *db_sqlite_query_control_candidates(size_t *out_n);
+
+/* Persist a successful retroactive CONTROL decode of row `id`: sets
+ * decrypted=1, node_id (only for NODE_DISCOVER_RESP, which reveals a
+ * real pubkey -- NULL/unchanged for NODE_DISCOVER_REQ, which has no
+ * derivable identity), and overwrites the stored json column with
+ * newly re-serialized JSON (caller re-serializes via
+ * feed_serialize_event_meshcore() with ts_override set to the row's
+ * original ts, same convention as the other _recover apply
+ * functions). Returns false if db_sqlite_init() wasn't called/
+ * failed, or the UPDATE affected no row. */
+bool db_sqlite_apply_control_recover(int64_t id, const char *node_id,
+                                     const char *json, size_t json_len);
+
 #endif /* DB_SQLITE_H */

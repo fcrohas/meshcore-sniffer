@@ -41,6 +41,7 @@ bool          opt_crc_bruteforce_2bit = false;
 bool          opt_crc_recover         = false;
 bool          opt_region_recover      = false;
 bool          opt_telemetry_recover   = false;
+bool          opt_control_recover     = false;
 bool          opt_show_untrusted      = false;
 bool          opt_diagnostics         = false;
 deep_decode_mode_t opt_deep_decode    = DEEP_DECODE_AUTO;
@@ -495,6 +496,7 @@ int options_parse(int argc, char **argv)
         O_SHOW_UNTRUSTED, O_DIAGNOSTICS, O_NO_CRC_BRUTEFORCE, O_CRC_BRUTEFORCE_2BIT, O_CRC_RECOVER,
         O_REGION_RECOVER,
         O_TELEMETRY_RECOVER,
+        O_CONTROL_RECOVER,
         O_DEEP_DECODE, O_FOCUS_WORKERS, O_FOCUS_HOLD_S, O_FOCUS_REWIND_MS,
         O_FOCUS_FREQS, O_FOCUS_RING_MS, O_FOCUS_MIN_SNR_DB, O_FOCUS_OS,
         O_SNAPSHOT_STORE, O_SNAPSHOT_PRE_MS, O_SNAPSHOT_POST_MS,
@@ -585,6 +587,7 @@ int options_parse(int argc, char **argv)
         { "crc-recover",     no_argument,       NULL, O_CRC_RECOVER },
         { "region-recover",   no_argument,       NULL, O_REGION_RECOVER },
         { "telemetry-recover", no_argument,      NULL, O_TELEMETRY_RECOVER },
+        { "control-recover",   no_argument,     NULL, O_CONTROL_RECOVER },
         { "deep-decode",     required_argument, NULL, O_DEEP_DECODE },
         { "focus-workers",   required_argument, NULL, O_FOCUS_WORKERS },
         { "focus-hold-s",    required_argument, NULL, O_FOCUS_HOLD_S },
@@ -796,6 +799,7 @@ int options_parse(int argc, char **argv)
         case O_CRC_RECOVER:      opt_crc_recover = true; break;
         case O_REGION_RECOVER:   opt_region_recover = true; break;
     case O_TELEMETRY_RECOVER: opt_telemetry_recover = true; break;
+        case O_CONTROL_RECOVER:  opt_control_recover = true; break;
         case O_DEEP_DECODE:
             if (!strcasecmp(optarg, "off"))       opt_deep_decode = DEEP_DECODE_OFF;
             else if (!strcasecmp(optarg, "auto")) opt_deep_decode = DEEP_DECODE_AUTO;

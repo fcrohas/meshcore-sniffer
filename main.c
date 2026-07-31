@@ -21,6 +21,7 @@
 #include "dedup.h"
 #include "crc_recover.h"
 #include "meshcore_lpp_recover.h"
+#include "meshcore_control_recover.h"
 #include "meshcore_region_recover.h"
 #include "meshcore_redecrypt.h"
 #include "feed.h"
@@ -4254,6 +4255,27 @@ int main(int argc, char **argv)
                 "  total updated and persisted:           %d\n",
                 stats.total_candidates, stats.resolved, stats.decode_failed, resolved);
         meshcore_channelset_destroy(cs);
+        db_sqlite_shutdown();
+        return 0;
+    }
+
+    if (opt_control_recover) {
+        if (!opt_sqlite_db) {
+            fprintf(stderr, "--control-recover requires --sqlite-db=PATH\n");
+            return 1;
+        }
+        if (!db_sqlite_init(opt_sqlite_db)) {
+            fprintf(stderr, "--control-recover: could not open %s\n", opt_sqlite_db);
+            return 1;
+        }
+        control_recover_stats_t stats;
+        int resolved = meshcore_control_recover_scan(&stats);
+        fprintf(stderr,
+                "control-recover: %zu CONTROL row(s) examined\n"
+                "  newly resolved (NODE_DISCOVER_REQ/_RESP):  %zu\n"
+                "  re-decode failed:                      %zu\n"
+                "  total updated and persisted:           %d\n",
+                stats.total_candidates, stats.resolved, stats.decode_failed, resolved);
         db_sqlite_shutdown();
         return 0;
     }

@@ -173,6 +173,7 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/crc_recover.c
     ${PROJECT_SOURCE_DIR}/meshcore_region_recover.c
     ${PROJECT_SOURCE_DIR}/meshcore_lpp_recover.c
+    ${PROJECT_SOURCE_DIR}/meshcore_control_recover.c
     ${PROJECT_SOURCE_DIR}/schema.c
     ${PROJECT_SOURCE_DIR}/scanner.c
     ${PROJECT_SOURCE_DIR}/web.c

@@ -97,6 +97,13 @@ extern bool          opt_crc_recover;
  * input. Requires --sqlite-db=PATH. */
 extern bool          opt_region_recover;
 extern bool          opt_telemetry_recover;
+/* --control-recover: one-shot, re-decode MeshCore CONTROL rows
+ * (meshcore_decoders.c's decode_control(), added after some CONTROL
+ * rows were already captured opaque) against every already-captured
+ * row in --sqlite-db, persist any newly-resolved
+ * NODE_DISCOVER_REQ/_RESP, print a report, and exit without touching
+ * any SDR/radio input. Requires --sqlite-db=PATH. */
+extern bool          opt_control_recover;
 extern bool          opt_show_untrusted;
 extern bool          opt_diagnostics;
 
