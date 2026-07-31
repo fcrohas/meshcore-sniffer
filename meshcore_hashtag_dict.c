@@ -64,10 +64,20 @@ static pthread_t     g_thread;
 static volatile int  g_run = 0;
 static int           g_started = 0;
 
-/* Track which channel_hash bytes have already been discovered to
- * suppress duplicate alerts -- a long capture would otherwise re-fire
- * on every frame for channels already cracked. */
-static uint8_t g_cracked_hashes[256] = {0};
+/* NOTE: deliberately no "already cracked, skip" gate keyed by the raw
+ * channel_hash byte here (there used to be one -- see git history).
+ * channel_hash is only 1 byte (256 values): on a mesh with more than
+ * a handful of distinct hashtag channels, two GENUINELY DIFFERENT
+ * channels sharing the same hash byte is common, not an edge case
+ * (observed in practice: "#lazarus" and "#meteo" both hash to 120 on
+ * a real capture). A frame only ever reaches this function after the
+ * live grp_decrypt() already failed against every channel CURRENTLY
+ * known for that hash byte, so any successful match found below is,
+ * by construction, always a genuinely new discovery -- gating on the
+ * hash byte instead of the frame's actual secret permanently blocked
+ * ever discovering the second (or third...) colliding channel once
+ * the first one on that hash byte was cracked, silently stranding
+ * its traffic as "known channel, but new messages never decode". */
 
 /* Appends entries from `path` into the already-allocated g_candidates
  * array (caller -- meshcore_hashtag_dict_init() -- allocates it once).
@@ -149,7 +159,6 @@ static void try_candidates(const mc_dict_frame_t *f)
     if (pkt.payload_type != MC_PAYLOAD_GRP_TXT && pkt.payload_type != MC_PAYLOAD_GRP_DATA) return;
     if (pkt.payload_len < 1) return;
     uint8_t channel_hash = pkt.payload[0];
-    if (g_cracked_hashes[channel_hash]) return;
 
     meshcore_channelset_t *trial = meshcore_channelset_create();
     if (!trial) return;
@@ -171,11 +180,13 @@ static void try_candidates(const mc_dict_frame_t *f)
             if (!decoded || !ev.decrypted) continue;
 
             /* Promote to the live channelset under the same
-             * derivation the real device would use, then stop -- one
-             * discovery per channel_hash is enough. */
+             * derivation the real device would use, then stop for
+             * THIS frame -- add_channel_locked() upserts by name, so
+             * re-finding the same channel later is a harmless no-op,
+             * and a different frame on a colliding hash byte gets its
+             * own independent attempt (see the note above). */
             meshcore_channelset_t *live = app_get_meshcore_channels();
             if (live) meshcore_channelset_add_hashtag(live, variants[vi], NULL, NULL);
-            g_cracked_hashes[channel_hash] = 1;
             emit_discovery(channel_hash, ev.channel_name[0] ? ev.channel_name : variants[vi]);
             meshcore_channelset_destroy(trial);
             return;

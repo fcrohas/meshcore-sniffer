@@ -185,10 +185,103 @@ static void test_department_channel_builtin(void)
     meshcore_channelset_destroy(g_test_channels);
 }
 
+/* Regression: channel_hash is only 1 byte (256 values), so two
+ * genuinely different hashtag channels sharing the same hash byte is
+ * common on a busy mesh (observed for real: "#lazarus" and "#meteo"
+ * both hash to the same byte in production). try_candidates() used to
+ * gate on a per-hash-byte "already cracked, skip" flag that, once set
+ * by discovering the FIRST channel on a given hash byte, silently
+ * blocked ever discovering a SECOND colliding channel on that same
+ * byte -- its traffic stayed undecodable forever even though the
+ * dashboard already showed a channel name for that hash. This
+ * deterministically finds a real collision (pigeonhole: trying more
+ * candidate names than there are hash-byte values guarantees one) and
+ * checks both channels get discovered, not just the first. */
+static void test_hash_collision_both_discovered(void)
+{
+    char name_a[32] = {0}, name_b[32] = {0};
+    uint8_t hash_a = 0, seen[256] = {0};
+    char seen_name[256][32];
+    bool found = false;
+
+    for (int i = 0; i < 300 && !found; ++i) {
+        char cand[32];
+        snprintf(cand, sizeof(cand), "collide%d", i);
+        uint8_t secret[16];
+        meshcore_channel_hashtag_secret(cand, secret);
+        uint8_t h = meshcore_channel_hash(secret, 16);
+        if (seen[h]) {
+            snprintf(name_a, sizeof(name_a), "%s", seen_name[h]);
+            snprintf(name_b, sizeof(name_b), "%s", cand);
+            hash_a = h;
+            found = true;
+        } else {
+            seen[h] = 1;
+            snprintf(seen_name[h], sizeof(seen_name[h]), "%s", cand);
+        }
+    }
+    CHECK(found, "collision: found two distinct names sharing one channel_hash byte");
+    if (!found) return;
+
+    g_test_channels = meshcore_channelset_create();
+    CHECK(g_test_channels != NULL, "collision: live channelset created");
+
+    uint8_t frame_a[128], frame_b[128];
+    size_t len_a = build_grp_txt_frame(name_a, "msg on channel A", frame_a);
+    size_t len_b = build_grp_txt_frame(name_b, "msg on channel B", frame_b);
+
+    meshcore_packet_t pkt_a, pkt_b;
+    CHECK(meshcore_packet_parse(frame_a, len_a, &pkt_a) == 0, "collision: frame A parses");
+    CHECK(meshcore_packet_parse(frame_b, len_b, &pkt_b) == 0, "collision: frame B parses");
+    CHECK(pkt_a.payload[0] == hash_a && pkt_b.payload[0] == hash_a,
+          "collision: both frames really do carry the same wire channel_hash byte");
+
+    char wordlist_path[] = "/tmp/mc_hashtag_dict_test_coll_XXXXXX";
+    int fd = mkstemp(wordlist_path);
+    CHECK(fd >= 0, "collision: wordlist temp file created");
+    FILE *wf = fdopen(fd, "w");
+    fprintf(wf, "%s\n%s\n", name_a, name_b);
+    fclose(wf);
+
+    CHECK(meshcore_hashtag_dict_init(wordlist_path), "collision: dict thread starts");
+
+    meshcore_hashtag_dict_enqueue(frame_a, len_a, 0.0f, 0.0f, 7, 5, 125000);
+    mesh_event_t ev_a;
+    bool discovered_a = false;
+    for (int i = 0; i < 300 && !discovered_a; ++i) {
+        usleep(10000);
+        memset(&ev_a, 0, sizeof(ev_a));
+        meshcore_decode_grp_txt(&pkt_a, g_test_channels, &ev_a);
+        if (ev_a.decrypted) discovered_a = true;
+    }
+    CHECK(discovered_a, "collision: first channel on the shared hash byte is discovered");
+
+    /* The regression: before the fix, this second, still-undecrypted
+     * frame on the SAME hash byte would never even be re-attempted by
+     * the dictionary thread, so it would stay undecryptable forever. */
+    meshcore_hashtag_dict_enqueue(frame_b, len_b, 0.0f, 0.0f, 7, 5, 125000);
+    mesh_event_t ev_b;
+    bool discovered_b = false;
+    for (int i = 0; i < 300 && !discovered_b; ++i) {
+        usleep(10000);
+        memset(&ev_b, 0, sizeof(ev_b));
+        meshcore_decode_grp_txt(&pkt_b, g_test_channels, &ev_b);
+        if (ev_b.decrypted) discovered_b = true;
+    }
+    CHECK(discovered_b, "collision: SECOND channel on the same shared hash byte is ALSO discovered");
+    CHECK(discovered_b && !strcmp(ev_b.mc_text, "msg on channel B"),
+          "collision: second channel's message decodes correctly");
+
+    meshcore_hashtag_dict_shutdown();
+    unlink(wordlist_path);
+    meshcore_channelset_destroy(g_test_channels);
+}
+
 int main(void)
 {
     test_discovery();
     test_department_channel_builtin();
+    test_hash_collision_both_discovered();
 
     if (failures) {
         fprintf(stderr, "\n%d check(s) FAILED\n", failures);

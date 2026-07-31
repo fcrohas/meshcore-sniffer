@@ -67,10 +67,19 @@ static pthread_t     g_thread;
 static volatile int  g_run = 0;
 static int           g_started = 0;
 
-/* Track which (channel_hash, spec) pairs have already been discovered to
- * suppress duplicate alerts -- a long capture would otherwise re-fire on
- * every frame for channels we already cracked. */
-static uint8_t g_cracked_hashes[256] = {0};
+/* NOTE: deliberately no "already cracked, skip" gate keyed by the raw
+ * channel_hash byte (there used to be one -- see meshcore_hashtag_
+ * dict.c's near-identical note, and git history, for the bug this
+ * caused there: channel_hash is only 1 byte (256 values), so two
+ * genuinely different channels sharing a hash byte is common on a
+ * busy mesh, not an edge case. A frame only ever reaches
+ * try_candidates() after the live decode already failed against
+ * every channel CURRENTLY known for that hash byte, so any
+ * successful match found there is always a genuinely new discovery
+ * -- gating on the hash byte instead of the frame's actual PSK
+ * permanently blocked ever discovering a second colliding channel
+ * once the first one on that hash byte was cracked, silently
+ * stranding its traffic as undecodable forever. */
 
 /* ---- Wordlist parsing ---- */
 
@@ -206,7 +215,6 @@ static void try_candidates(const psk_frame_t *f)
 {
     if (f->len < 16) return; /* too short for a mesh header + cipher */
     uint8_t channel_hash = f->bytes[13];
-    if (g_cracked_hashes[channel_hash]) return;
 
     for (size_t i = 0; i < g_candidate_count; ++i) {
         if (!g_run) return; /* shutting down */
@@ -239,7 +247,6 @@ static void try_candidates(const psk_frame_t *f)
                 keyset_add_raw(live, channel_hash, c->psk, c->psk_len,
                                ctx.channel_name[0] ? ctx.channel_name : "(discovered)");
             }
-            g_cracked_hashes[channel_hash] = 1;
             emit_discovery(channel_hash, c, ctx.channel_name);
             return;
         }
@@ -309,8 +316,6 @@ void psk_dict_enqueue(const uint8_t *frame_bytes, size_t frame_len,
 {
     if (!g_started || !frame_bytes || frame_len == 0) return;
     if (frame_len > PSK_FRAME_MAX_BYTES) frame_len = PSK_FRAME_MAX_BYTES;
-    /* Pre-filter: only enqueue if we haven't already cracked this hash. */
-    if (frame_len >= 14 && g_cracked_hashes[frame_bytes[13]]) return;
 
     pthread_mutex_lock(&g_q_mu);
     int next = (g_q_head + 1) % PSK_QUEUE_SIZE;
