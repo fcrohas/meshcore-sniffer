@@ -116,9 +116,14 @@ static void serialize_event(jw_t *j, const mesh_event_t *ev)
         jw_field_bool(j, "payload_crc_ok", ev->payload_crc_ok);
     /* Only meaningful alongside payload_crc_ok==true: distinguishes a
      * frame recovered via lora_crc_bruteforce_correct()'s single-bit
-     * search from a clean first-pass CRC match. */
-    if (ev->has_crc && ev->payload_crc_ok && ev->crc_corrected)
+     * search (or the two-bit fallback) from a clean first-pass CRC
+     * match. crc_corrected_bits==2 is only ever reached here once
+     * main.c's on_mesh_event has confirmed independent authentication
+     * (mesh_event_crc2bit_trusted()) -- see mesh_packet.h. */
+    if (ev->has_crc && ev->payload_crc_ok && ev->crc_corrected) {
         jw_field_bool(j, "crc_corrected", true);
+        jw_field_u32(j, "crc_corrected_bits", (uint32_t)ev->crc_corrected_bits);
+    }
     /* fields_trusted is the honest answer to "should a consumer treat
      * the decoded from/to/packet_id/etc. as factual?" It is true only
      * when we have positive evidence the bytes were received intact:
