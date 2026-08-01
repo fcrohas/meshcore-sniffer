@@ -157,6 +157,7 @@ set(SOURCES
     ${PROJECT_SOURCE_DIR}/mesh_decoders.c
     ${PROJECT_SOURCE_DIR}/jw.c
     ${PROJECT_SOURCE_DIR}/feed_meshcore_json.c
+    ${PROJECT_SOURCE_DIR}/feed_meshcore_observer.c
     ${PROJECT_SOURCE_DIR}/feed.c
     ${PROJECT_SOURCE_DIR}/announce.c
     ${PROJECT_SOURCE_DIR}/gpsd.c
@@ -474,6 +475,7 @@ add_executable(test_feed_meshcore
     ${PROJECT_SOURCE_DIR}/tests/test_feed_meshcore.c
     ${PROJECT_SOURCE_DIR}/jw.c
     ${PROJECT_SOURCE_DIR}/feed_meshcore_json.c
+    ${PROJECT_SOURCE_DIR}/feed_meshcore_observer.c
     ${PROJECT_SOURCE_DIR}/node_db.c
     ${PROJECT_SOURCE_DIR}/node_db_persist_stub.c
     ${PROJECT_SOURCE_DIR}/meshcore.c

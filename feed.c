@@ -11,6 +11,7 @@
 #include "db_sqlite.h"
 #include "feed.h"
 #include "feed_meshcore_json.h"
+#include "feed_meshcore_observer.h"
 #include "geofence.h"
 #include "gpsd.h"
 #include "jw.h"
@@ -727,7 +728,22 @@ void feed_publish_event(const mesh_event_t *ev)
     serialize_event(&j, ev);
     emit_to_stdout(buf, j.len);
     if (g_udp_feed_count) emit_to_udp(buf, j.len);
-    mqtt_publish(buf, j.len);
+    if (opt_mqtt_observer) {
+        /* LetsMesh/MeshRank are MeshCore-only observer platforms; skip
+         * Meshtastic events entirely rather than send them a schema they
+         * don't expect (see feed_meshcore_observer.h). */
+        if (ev->is_meshcore) {
+            char obuf[1024];
+            jw_t oj;
+            jw_init(&oj, obuf, sizeof(obuf));
+            feed_serialize_event_observer(&oj, ev,
+                opt_station_id ? opt_station_id : "observer",
+                opt_mqtt_observer_id);
+            mqtt_publish(obuf, oj.len);
+        }
+    } else {
+        mqtt_publish(buf, j.len);
+    }
     zmq_pub_publish(buf, j.len);
     web_publish_line(buf, j.len);
     archive_publish(buf, j.len);

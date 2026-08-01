@@ -104,6 +104,17 @@ extern bool          opt_telemetry_recover;
  * NODE_DISCOVER_REQ/_RESP, print a report, and exit without touching
  * any SDR/radio input. Requires --sqlite-db=PATH. */
 extern bool          opt_control_recover;
+/* --lora-soft: enable lora.c's soft-decision (LLR) decoding path on
+ * every LoRa decoder created for the rest of this run. Off by
+ * default -- costs ~50KB extra LLR storage per decoder and only
+ * matters near the SNR floor. lora.c is also linked standalone into
+ * a few diagnostic binaries (test_crc_bruteforce, test_oversample_
+ * self, focused_demo) that don't link options.c at all, so this
+ * can't be a direct opt_lora_soft reference over there -- main()
+ * instead exports it as the MESHTASTIC_LORA_SOFT=1 env var
+ * lora_decoder_create() already reads (see lora.c), so lora.c stays
+ * fully decoupled from the options module. */
+extern bool          opt_lora_soft;
 extern bool          opt_show_untrusted;
 extern bool          opt_diagnostics;
 
@@ -221,11 +232,43 @@ extern int   opt_feed_count;
 extern char *opt_mqtt_host;
 extern int   opt_mqtt_port;
 extern char *opt_mqtt_topic;
+/* MQTT auth/TLS. user/pass NULL = unauthenticated (prior behavior).
+ * tls off = plain TCP (prior behavior); cafile NULL under tls means
+ * "search common system CA bundle paths", falling back to an error
+ * unless insecure is also set. */
+extern char *opt_mqtt_user;
+extern char *opt_mqtt_pass;
+extern bool  opt_mqtt_tls;
+extern char *opt_mqtt_cafile;
+extern bool  opt_mqtt_insecure;
+/* --mqtt-observer: publish MeshCore events to a LetsMesh/MeshRank-
+ * compatible "observer" feed instead of the sniffer's native JSON
+ * schema (see feed_meshcore_observer.h). Requires iata + observer_id
+ * so the topic (meshcore/{iata}/{observer_id}/packets) is stable
+ * across restarts -- these platforms correlate sightings by that
+ * identity, so a fresh random id every run would fragment an
+ * operator's own history on their dashboard. Meshtastic events are
+ * not published in this mode: LetsMesh/MeshRank are MeshCore-only
+ * consumers, and sending them the wrong schema would be worse than
+ * silently dropping it from this sink. */
+extern bool  opt_mqtt_observer;
+extern char *opt_mqtt_iata;
+extern char *opt_mqtt_observer_id;
 extern char *opt_zmq_endpoint;
 extern char *opt_cot_multicast;          /* "239.2.3.1:6969" or NULL */
 extern int   opt_web_port;
 extern char *opt_station_id;
 extern char *opt_gpsd_endpoint;          /* "host:port"; NULL = disabled */
+/* --rx-lat/--rx-lon: manually declared station position, for
+ * deployments with no gpsd (fixed antenna install, no GPS receiver
+ * at all). gpsd_get_fix() (gpsd.c) checks these FIRST -- if set, they
+ * win over a live gpsd fix and are always reported as fresh (age 0s),
+ * so every emitted JSON event gets station_lat/station_lon exactly
+ * like the --gpsd path does (see feed.c's serialize_event()), and the
+ * dashboard's Topology tab can place this station at its real
+ * position on the map instead of falling back to an estimated
+ * centroid. NAN means "unset"; both must be set together. */
+extern double opt_rx_lat, opt_rx_lon;
 extern char *opt_api_token;              /* bearer token for POST /api endpoints; NULL = unauthenticated */
 extern char *opt_pcap_path;              /* path to pcap file; NULL = disabled */
 extern char *opt_pcap_fifo;              /* path to pcap fifo; NULL = disabled */

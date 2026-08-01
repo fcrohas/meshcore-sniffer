@@ -11,6 +11,7 @@
 
 #include <ctype.h>
 #include <getopt.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,7 @@ bool          opt_crc_recover         = false;
 bool          opt_region_recover      = false;
 bool          opt_telemetry_recover   = false;
 bool          opt_control_recover     = false;
+bool          opt_lora_soft           = false;
 bool          opt_show_untrusted      = false;
 bool          opt_diagnostics         = false;
 deep_decode_mode_t opt_deep_decode    = DEEP_DECODE_AUTO;
@@ -132,6 +134,14 @@ int   opt_feed_count              = 0;
 char *opt_mqtt_host               = NULL;
 int   opt_mqtt_port               = 1883;
 char *opt_mqtt_topic              = NULL;
+char *opt_mqtt_user               = NULL;
+char *opt_mqtt_pass               = NULL;
+bool  opt_mqtt_tls                = false;
+char *opt_mqtt_cafile             = NULL;
+bool  opt_mqtt_insecure           = false;
+bool  opt_mqtt_observer           = false;
+char *opt_mqtt_iata               = NULL;
+char *opt_mqtt_observer_id        = NULL;
 char *opt_zmq_endpoint            = NULL;
 char *opt_announce_to             = NULL;
 char *opt_c2_dealer               = NULL;
@@ -142,6 +152,7 @@ char *opt_cot_multicast           = NULL;
 int   opt_web_port                = 0;
 char *opt_station_id              = NULL;
 char *opt_gpsd_endpoint           = NULL;
+double opt_rx_lat = NAN, opt_rx_lon = NAN;
 char *opt_api_token               = NULL;
 char *opt_pcap_path               = NULL;
 char *opt_pcap_fifo               = NULL;
@@ -330,6 +341,24 @@ void options_print_help(const char *prog)
         "  --feed=HOST:PORT       JSON UDP feed (repeatable, max %d)\n"
         "  --mqtt=HOST[:PORT]     MQTT broker\n"
         "  --mqtt-topic=TOPIC     MQTT topic (default: meshtastic/<station>)\n"
+        "  --mqtt-user=USER       MQTT username\n"
+        "  --mqtt-pass=PASS       MQTT password\n"
+        "  --mqtt-tls             connect over TLS (CA bundle auto-detected;\n"
+        "                         override with --mqtt-cafile, or --mqtt-insecure\n"
+        "                         to skip verification)\n"
+        "  --mqtt-cafile=PATH     CA bundle for --mqtt-tls\n"
+        "  --mqtt-insecure        skip TLS certificate verification (--mqtt-tls only)\n"
+        "  --mqtt-observer        publish MeshCore packets in the LetsMesh/MeshRank\n"
+        "                         observer JSON schema, topic\n"
+        "                         meshcore/<iata>/<observer-id>/packets, with an\n"
+        "                         online/offline status LWT. Requires --mqtt-iata\n"
+        "                         and --mqtt-observer-id. Register at your target\n"
+        "                         platform's observer onboarding page first (e.g.\n"
+        "                         https://analyzer.letsmesh.net/observer/onboard)\n"
+        "                         to get a broker host/port/auth and IATA code.\n"
+        "  --mqtt-iata=CODE       3-letter region code for --mqtt-observer\n"
+        "  --mqtt-observer-id=ID  stable observer identity for --mqtt-observer\n"
+        "                         (reuse the same value every run)\n"
         "  --zmq[=ENDPOINT]       ZMQ PUB (default tcp://*:7008)\n"
         "  --cot-multicast=GROUP[:PORT]\n"
         "                         republish ATAK port-72 PLIs as CoT XML to a\n"
@@ -341,6 +370,11 @@ void options_print_help(const char *prog)
         "                         JSON event with station_lat / station_lon /\n"
         "                         station_alt_m so a multi-station deployment\n"
         "                         can group same-packet observations spatially.\n"
+        "  --rx-lat=DEG           this station's own latitude, for deployments\n"
+        "  --rx-lon=DEG           with no gpsd (fixed install, no GPS receiver).\n"
+        "                         Overrides a live --gpsd fix when both are set;\n"
+        "                         tags events with station_lat/station_lon the\n"
+        "                         same as --gpsd would. Both required together.\n"
         "  --api-token=SECRET     require 'Authorization: Bearer SECRET' on every\n"
         "                         POST /api/* request. GET endpoints (dashboard,\n"
         "                         /events SSE) stay open. Unset = no auth.\n"
@@ -486,7 +520,9 @@ int options_parse(int argc, char **argv)
         O_NO_MESHCORE_HASHTAG_DICT,
         O_IQ_RECORD, O_STATS_JSON, O_FFTW_WISDOM,
         O_WEBHOOK_URL, O_WEBHOOK_ON, O_WEBHOOK_FORMAT, O_WEBHOOK_TIMEOUT_MS,
-        O_FEED, O_MQTT, O_MQTT_TOPIC, O_ZMQ, O_COT, O_WEB, O_STATION, O_GPSD, O_API_TOKEN,
+        O_FEED, O_MQTT, O_MQTT_TOPIC, O_ZMQ, O_COT, O_WEB, O_STATION, O_GPSD, O_RX_LAT, O_RX_LON, O_API_TOKEN,
+        O_MQTT_USER, O_MQTT_PASS, O_MQTT_TLS, O_MQTT_CAFILE, O_MQTT_INSECURE,
+        O_MQTT_OBSERVER, O_MQTT_IATA, O_MQTT_OBSERVER_ID,
         O_PCAP, O_PCAP_FIFO, O_PSK_WORDLIST, O_MESHCORE_HASHTAG_WORDLIST,
         O_ARCHIVE, O_SQLITE_DB, O_HISTORY_REPLAY_HOURS, O_GEOFENCE, O_ANNOUNCE_TO, O_C2_DEALER,
         O_ZMQ_CURVE_SECRET, O_ZMQ_CURVE_KEYGEN, O_STATION_T_ACC_NS,
@@ -497,6 +533,7 @@ int options_parse(int argc, char **argv)
         O_REGION_RECOVER,
         O_TELEMETRY_RECOVER,
         O_CONTROL_RECOVER,
+        O_LORA_SOFT,
         O_DEEP_DECODE, O_FOCUS_WORKERS, O_FOCUS_HOLD_S, O_FOCUS_REWIND_MS,
         O_FOCUS_FREQS, O_FOCUS_RING_MS, O_FOCUS_MIN_SNR_DB, O_FOCUS_OS,
         O_SNAPSHOT_STORE, O_SNAPSHOT_PRE_MS, O_SNAPSHOT_POST_MS,
@@ -556,11 +593,21 @@ int options_parse(int argc, char **argv)
         { "feed",       required_argument, NULL, O_FEED },
         { "mqtt",       required_argument, NULL, O_MQTT },
         { "mqtt-topic", required_argument, NULL, O_MQTT_TOPIC },
+        { "mqtt-user",     required_argument, NULL, O_MQTT_USER },
+        { "mqtt-pass",     required_argument, NULL, O_MQTT_PASS },
+        { "mqtt-tls",      no_argument,       NULL, O_MQTT_TLS },
+        { "mqtt-cafile",   required_argument, NULL, O_MQTT_CAFILE },
+        { "mqtt-insecure", no_argument,       NULL, O_MQTT_INSECURE },
+        { "mqtt-observer", no_argument,       NULL, O_MQTT_OBSERVER },
+        { "mqtt-iata",     required_argument, NULL, O_MQTT_IATA },
+        { "mqtt-observer-id", required_argument, NULL, O_MQTT_OBSERVER_ID },
         { "zmq",        optional_argument, NULL, O_ZMQ },
         { "cot-multicast", required_argument, NULL, O_COT },
         { "web",        optional_argument, NULL, O_WEB },
         { "station-id", required_argument, NULL, O_STATION },
         { "gpsd",       optional_argument, NULL, O_GPSD },
+        { "rx-lat",     required_argument, NULL, O_RX_LAT },
+        { "rx-lon",     required_argument, NULL, O_RX_LON },
         { "api-token",  required_argument, NULL, O_API_TOKEN },
         { "pcap",       required_argument, NULL, O_PCAP },
         { "pcap-fifo",  required_argument, NULL, O_PCAP_FIFO },
@@ -588,6 +635,7 @@ int options_parse(int argc, char **argv)
         { "region-recover",   no_argument,       NULL, O_REGION_RECOVER },
         { "telemetry-recover", no_argument,      NULL, O_TELEMETRY_RECOVER },
         { "control-recover",   no_argument,     NULL, O_CONTROL_RECOVER },
+        { "lora-soft",        no_argument,     NULL, O_LORA_SOFT },
         { "deep-decode",     required_argument, NULL, O_DEEP_DECODE },
         { "focus-workers",   required_argument, NULL, O_FOCUS_WORKERS },
         { "focus-hold-s",    required_argument, NULL, O_FOCUS_HOLD_S },
@@ -763,11 +811,21 @@ int options_parse(int argc, char **argv)
             break;
         }
         case O_MQTT_TOPIC: opt_mqtt_topic = strdup(optarg); break;
+        case O_MQTT_USER:     opt_mqtt_user = strdup(optarg); break;
+        case O_MQTT_PASS:     opt_mqtt_pass = strdup(optarg); break;
+        case O_MQTT_TLS:      opt_mqtt_tls = true; break;
+        case O_MQTT_CAFILE:   opt_mqtt_cafile = strdup(optarg); break;
+        case O_MQTT_INSECURE: opt_mqtt_insecure = true; break;
+        case O_MQTT_OBSERVER: opt_mqtt_observer = true; break;
+        case O_MQTT_IATA:     opt_mqtt_iata = strdup(optarg); break;
+        case O_MQTT_OBSERVER_ID: opt_mqtt_observer_id = strdup(optarg); break;
         case O_ZMQ:        opt_zmq_endpoint = optarg ? strdup(optarg) : strdup("tcp://*:7008"); break;
         case O_COT:        opt_cot_multicast = strdup(optarg); break;
         case O_WEB:        opt_web_port = optarg ? atoi(optarg) : 8888; break;
         case O_STATION:    opt_station_id = strdup(optarg); break;
         case O_GPSD:       opt_gpsd_endpoint = strdup(optarg ? optarg : "localhost:2947"); break;
+        case O_RX_LAT:     opt_rx_lat = strtod(optarg, NULL); break;
+        case O_RX_LON:     opt_rx_lon = strtod(optarg, NULL); break;
         case O_API_TOKEN:  opt_api_token = strdup(optarg); break;
         case O_PCAP:       opt_pcap_path = strdup(optarg); break;
         case O_PCAP_FIFO:  opt_pcap_fifo = strdup(optarg); break;
@@ -800,6 +858,7 @@ int options_parse(int argc, char **argv)
         case O_REGION_RECOVER:   opt_region_recover = true; break;
     case O_TELEMETRY_RECOVER: opt_telemetry_recover = true; break;
         case O_CONTROL_RECOVER:  opt_control_recover = true; break;
+        case O_LORA_SOFT:        opt_lora_soft = true; break;
         case O_DEEP_DECODE:
             if (!strcasecmp(optarg, "off"))       opt_deep_decode = DEEP_DECODE_OFF;
             else if (!strcasecmp(optarg, "auto")) opt_deep_decode = DEEP_DECODE_AUTO;
@@ -866,6 +925,15 @@ int options_parse(int argc, char **argv)
     if (!opt_region)     opt_region     = strdup("US");
     if (!opt_preset_csv) opt_preset_csv = strdup("LongFast");
     if (!opt_keys_csv)   opt_keys_csv   = strdup("default");
+
+    if (opt_mqtt_observer && (!opt_mqtt_iata || !opt_mqtt_observer_id)) {
+        fprintf(stderr,
+                "--mqtt-observer requires --mqtt-iata=CODE and --mqtt-observer-id=ID\n"
+                "(pick a stable id you'll reuse on every run, e.g. `openssl rand -hex 16`;\n"
+                "get your broker host/port/auth and IATA region code from the platform's\n"
+                "observer onboarding page first, e.g. https://analyzer.letsmesh.net/observer/onboard)\n");
+        return 2;
+    }
 
     return 0;
 }
