@@ -61,9 +61,11 @@ When a worker can't keep up with the live sample rate, it disarms itself and cou
 `--protocol=meshcore` switches the same channelizer/focused-decode pipeline to MeshCore's LoRa framing instead of Meshtastic's. Everything else (dedup, JSON/MQTT/ZMQ/CoT/pcap/web outputs, deep-decode) applies unchanged.
 
 ```bash
-./meshcore-sniffer --sdrplay --meshcore-freq=869618000 --meshcore-sf=8 \
-                    --meshcore-cr=8 --meshcore-bw=62500 --protocol=meshcore \
-                    --web=8888
+./meshcore-sniffer --sdrplay --sdrplay-lna=1 --sdrplay-agc --sdrplay-agc-setpoint=-45 \
+                    --rate=2000000 --center=869000000 --lora-soft \
+                    --protocol=meshcore --meshcore-freq=869618000 --meshcore-sf=8 \
+                    --meshcore-cr=8 --meshcore-bw=62500 --focus-min-snr-db=0 \
+                    --sqlite-db=./base.db --web
 ```
 
 - **Payload decode**: ADVERT (node identity + Ed25519 signature verification), GRP_TXT/GRP_DATA (channel chat/data, HMAC-SHA256 + AES-128-ECB), TRACE (route/SNR hops), ACK, and envelope-only parsing (dest/src hashes) for REQ/RESPONSE/PATH/TXT_MSG/ANON_REQ where a passive sniffer has no key material to go further.
