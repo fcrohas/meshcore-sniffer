@@ -47,6 +47,8 @@ extern int       app_add_runtime_extra_freq(uint64_t f_hz, int bw_hz, int sf, in
 #define API_NODE_HISTORY_MAX_LIMIT     1000 /* GET /api/node-history hard cap */
 #define API_TELEMETRY_DEFAULT_LIMIT 200  /* GET /api/telemetry default row count */
 #define API_TELEMETRY_MAX_LIMIT     1000 /* GET /api/telemetry hard cap */
+#define API_TOPOLOGY_DEFAULT_LIMIT 3000  /* GET /api/topology default row count */
+#define API_TOPOLOGY_MAX_LIMIT     20000 /* GET /api/topology hard cap */
 
 static int  g_listen_fd = -1;
 static int  g_sse_fds[MAX_SSE_CLIENTS];
@@ -108,6 +110,9 @@ static const char DASHBOARD_HTML[] =
 ".leaflet-tooltip.node-id-label{background:rgba(15,23,42,0.85);border:1px solid #334155;color:#e2e8f0;font-size:10px;font-family:'SF Mono',Consolas,monospace;font-weight:600;padding:1px 4px;box-shadow:none}\n"
 ".leaflet-tooltip.node-id-label:before{display:none}\n"
 "html.light .leaflet-tooltip.node-id-label{background:rgba(255,255,255,0.9);border-color:#cbd5e1;color:#1e293b}\n"
+".leaflet-tooltip.topo-snr-label{background:rgba(12,74,110,0.92);border:1px solid #0369a1;color:#e0f2fe;font-size:10px;font-family:'SF Mono',Consolas,monospace;font-weight:700;padding:1px 5px;box-shadow:none}\n"
+".leaflet-tooltip.topo-snr-label:before{display:none}\n"
+"html.light .leaflet-tooltip.topo-snr-label{background:rgba(224,242,254,0.95);border-color:#0284c7;color:#0c4a6e}\n"
 "h2{margin:0 0 6px 0;font-size:12px;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;font-weight:600;border-bottom:1px solid #334155;padding-bottom:5px;display:flex;align-items:center;gap:8px}\n"
 "h2 .muted{font-weight:400;text-transform:none;letter-spacing:0;color:#64748b;font-size:11px;flex:1}\n"
 "h2 button{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:3px 9px;cursor:pointer;font-size:11px}\n"
@@ -150,7 +155,6 @@ static const char DASHBOARD_HTML[] =
 ".log-item{padding:5px 0;border-bottom:1px dotted #1e293b;font-size:12px;line-height:1.5;word-wrap:break-word}\n"
 ".log-item .ts{color:#64748b;font-size:11px;margin-right:6px}\n"
 ".log-item b{color:#38bdf8}\n"
-".port{color:#a78bfa;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;background:#1e1b2e;padding:1px 5px;border-radius:3px;margin:0 4px}\n"
 ".snr-arrow{margin-left:3px;font-size:12px;line-height:1}\n"
 ".snr-up   {color:#4ade80}\n"
 ".snr-down {color:#f87171}\n"
@@ -230,6 +234,11 @@ static const char DASHBOARD_HTML[] =
 ".region-badge.unresolved{background:#292524;color:#a8a29e;font-weight:500;font-family:'SF Mono',Consolas,monospace}\n"
 "html.light .region-badge{background:#e0e7ff;color:#3730a3}\n"
 "html.light .region-badge.unresolved{background:#f1f5f9;color:#64748b}\n"
+/* Dup badge (same message, multiple relay paths -- see findDupRow()/
+ * mergeDup() in the Channels-tab JS). Teal, deliberately distinct from
+ * region-badge's indigo so the two aren't confused at a glance. */
+"span.dup-badge{display:inline-block;margin:0 4px 4px 0;padding:0 6px;border-radius:8px;font-size:10px;font-weight:600;vertical-align:middle;background:#134e4a;color:#5eead4;cursor:default}\n"
+"html.light span.dup-badge{background:#ccfbf1;color:#0f766e}\n"
 "#chantab-msgs .chat-bubble{background:#1e293b;border-radius:12px;padding:8px 12px;font-size:13px;line-height:1.4;word-wrap:break-word;white-space:pre-wrap;display:inline-block}\n"
 "#chantab-msgs .chat-msg.side-b .chat-bubble{background:#1e3a5f}\n"
 "#chantab-msgs .chat-foot{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:11px;color:#64748b}\n"
@@ -277,6 +286,14 @@ static const char DASHBOARD_HTML[] =
 "html.light #tabs button{color:#94a3b8}\n"
 "html.light #tabs button:hover{color:#475569}\n"
 "html.light #tabs button.active{color:#0284c7;border-bottom-color:#0284c7}\n"
+/* Mobile swipe-page sub-tabs (#live-swipe-nav / #channelstab-swipe-nav,
+ * see their dark-theme rules above) never had a light-theme override at
+ * all -- hardcoded dark background/border, so they stayed dark even
+ * when the rest of the page switched to light. Same treatment as #tabs
+ * above, the top-level tab bar this is visually a second tier of. */
+"html.light #live-swipe-nav,html.light #channelstab-swipe-nav{background:#ffffff;border-bottom-color:#cbd5e1}\n"
+"html.light #live-swipe-nav button,html.light #channelstab-swipe-nav button{color:#94a3b8}\n"
+"html.light #live-swipe-nav button.active,html.light #channelstab-swipe-nav button.active{color:#0284c7;border-bottom-color:#0284c7}\n"
 "html.light .pane{background:#ffffff}\n"
 "html.light h2{color:#0284c7;border-bottom-color:#e2e8f0}\n"
 "html.light h2 .muted{color:#94a3b8}\n"
@@ -514,8 +531,8 @@ static const char DASHBOARD_HTML[] =
 "    <div class=\"hint\">Off by default. Frames without verified bytes (e.g. cross-slot phantoms of a real TX, or noise patterns that passed the 5-bit header checksum by chance) decode to corrupted from/to/packet_id fields. Surfacing them invents nodes that don't exist. Turn this on for diagnostic inspection of what the demod produced before trust filtering.</div>\n"
 "  </div>\n"
 "  <div class=\"row\">\n"
-"    <label><input type=\"checkbox\" id=\"showNodeIdLabels\" checked> Show node ID (first 4 hex chars) next to markers on the map</label>\n"
-"    <div class=\"hint\">On by default. Shows a small always-visible label with the first 4 hex digits of each node's id (e.g. \"532b\") beside its marker, alongside its name.</div>\n"
+"    <label><input type=\"checkbox\" id=\"showNodeIdLabels\"> Show node ID (first 4 hex chars) next to markers on the map</label>\n"
+"    <div class=\"hint\">Off by default. Shows a small always-visible label with the first 4 hex digits of each node's id (e.g. \"532b\") beside its marker, alongside its name.</div>\n"
 "  </div>\n"
 "</div>\n"
 "<div id=\"stats\" class=\"tab\">\n"
@@ -1332,7 +1349,26 @@ static const char DASHBOARD_HTML[] =
 "      add('Discover since', p.ctl_since ? fmtTime(p.ctl_since) : undefined);\n"
 "      add('Responder SNR', p.ctl_snr !== undefined ? p.ctl_snr.toFixed(1)+' dB' : undefined);\n"
 "      add('Discovered node type', p.adv_type_name);\n"
-"      ['ctl_subtype','ctl_tag','ctl_filter','ctl_since','ctl_snr','adv_type','adv_type_name'].forEach(k=>shown.add(k));\n"
+/* NODE_DISCOVER_RESP's responder id (p.from) only ever gets derived
+ * (mc_derive_from_id(), feed_meshcore_json.c) when the frame's CRC
+ * passed -- an explicit "id present or not, and why" row here beats
+ * silently falling into the generic 'Other' dump below when present,
+ * or vanishing with no explanation at all when absent: ctl_snr/
+ * adv_type_name/etc. above are still shown either way (this tab
+ * intentionally surfaces best-effort fields from CRC-failed frames
+ * for RF diagnostics -- see the CRC badge column for trust status),
+ * so "SNR present, but no id" reads as a bug/omission without this.
+ * NODE_DISCOVER_REQ never carries an identity at all (see
+ * mc_derive_from_id()'s doc comment) -- that's a protocol
+ * limitation, not something this frame failed to reveal, so it gets
+ * its own explanatory row instead of just never appearing. */
+"      if (p.ctl_subtype === 'NODE_DISCOVER_RESP') {\n"
+"        add('Responder id', p.from ||\n"
+"          'unknown \\u2014 this frame failed CRC (see the CRC column), so its parsed pubkey isn\\'t trustworthy enough to name a real node');\n"
+"      } else if (p.ctl_subtype === 'NODE_DISCOVER_REQ') {\n"
+"        add('Requester id', 'not revealed \\u2014 MeshCore\\'s discovery convention doesn\\'t include the requester\\'s identity in this frame type');\n"
+"      }\n"
+"      ['ctl_subtype','ctl_tag','ctl_filter','ctl_since','ctl_snr','adv_type','adv_type_name','from'].forEach(k=>shown.add(k));\n"
 "    }\n"
 "    if (p.mc_type === 'MULTIPART') {\n"
 "      add('Multipart remaining', p.multipart_remaining);\n"
@@ -1911,10 +1947,23 @@ static const char DASHBOARD_HTML[] =
 "  if (Date.now()/1000 - p.ts > 5) return;\n"
 "  const ids = frameHopIds(p);\n"
 "  const hops = [];\n"
+/* frameHopIds() only ever returns the INTERMEDIATE resolved relay
+ * hops -- the beam used to start and end mid-air with no anchor at
+ * either end, and (worse) a direct/zero-relay frame had zero
+ * intermediate hops at all, so it never drew a beam whatsoever.
+ * Anchor it properly: the originating sender (p.from) at the start,
+ * this station (stationMarker -- we're who actually received this
+ * specific over-the-air transmission, same convention as the
+ * Topology tab's RX_STATION_ID anchor) at the end. Either end is
+ * simply omitted if unpositioned, same as an unresolved intermediate
+ * hop already is. */
+"  const srcMarker = p.from && markers[p.from];\n"
+"  if (srcMarker && srcMarker.getLatLng) hops.push(srcMarker.getLatLng());\n"
 "  for (const id of ids) {\n"
 "    const m = markers[id];\n"
 "    if (m && m.getLatLng) hops.push(m.getLatLng());\n"
 "  }\n"
+"  if (stationMarker) hops.push(stationMarker.getLatLng());\n"
 "  if (!hops.length) return;\n"
 "  const color = FRAME_TYPE_COLORS[p.mc_type || p.port_name] || FRAME_TYPE_COLOR_OTHER;\n"
 "  if (hops.length < 2) { pulseNode(hops[0], color); return; }\n"
@@ -1950,6 +1999,15 @@ static const char DASHBOARD_HTML[] =
 "  } else {\n"
 "    stationMarker.setLatLng(ll);\n"
 "  }\n"
+/* Topology's own map only redraws in response to an edge/node-related
+ * event (topoNoteEdge/topoNoteAddressed/topoNoteRelay); this function
+ * doesn't touch any of those, so without this call, a RX position that
+ * only just became known (first --rx-lat/--rx-lon-derived fix, or gpsd
+ * only just acquiring one) wouldn't be reflected on the Topology map
+ * until some unrelated edge happened to fire next -- possibly a long
+ * wait on a quiet mesh. Cheap to call every time (already
+ * requestAnimationFrame-batched, see topoMapRenderScheduled()). */
+"  topoMapRenderScheduled();\n"
 "  if (typeof alt === 'number')\n"
 "    stationMarker.setPopupContent(`<b>RX station</b><br>this sniffer<br>${alt.toFixed(1)} m`);\n"
 "}\n"
@@ -2012,20 +2070,53 @@ static const char DASHBOARD_HTML[] =
 /* buildMsgRow -- shared row shape for both live SSE chat frames
  * (noteChannelMessage) and DB-loaded scroll-back (loadOlderMessages),
  * so the two sources render identically without duplicating the
- * field mapping. */
+ * field mapping. dedupKey/seenCount/seenPaths back the "same message,
+ * multiple relay paths" grouping in findDupRow()/mergeDup() below. */
 "function buildMsgRow(p, summary){\n"
 "  return {t:p.ts, from:p.from||null, name:p.long_name||p.node_name||null,\n"
 "          type:p.port_name||p.mc_type||'', summary:summary, rawText:p.text||null, path:pathSummary(p),\n"
 "          pathHex:p.route_path_hex||p.trace_route_hashes_hex||null,\n"
 "          pathHopCount:p.route_path_hash_count||(p.trace_route_hashes_hex?p.trace_route_hashes_hex.length/2:0),\n"
 "          pathHashSize:p.route_path_hash_size||1,\n"
-"          regionScope:p.region_scope===true, regionCode1:p.region_code1, regionName:p.region_name||null};\n"
+"          regionScope:p.region_scope===true, regionCode1:p.region_code1, regionName:p.region_name||null,\n"
+"          dedupKey:p.mc_timestamp||p.packet_id||null, seenCount:1, seenPaths:[pathSummary(p)].filter(Boolean)};\n"
 "}\n"
+/* findDupRow/mergeDup -- the same logical message often gets heard
+ * more than once: MeshCore's mc_timestamp / Meshtastic's packet_id is
+ * set ONCE by the originating node and re-broadcast unchanged by every
+ * repeater (confirmed against meshcore_decode_grp_txt() -- it reads
+ * mc_timestamp from the decrypted plaintext, not our own reception
+ * time), so it stays identical across every relay copy even though
+ * each copy's own path/ts differs. text is also compared as a cheap
+ * safety net against a dedupKey collision between two genuinely
+ * different messages. Only the last few candidates are scanned since
+ * a message's relay copies normally all arrive within a few seconds
+ * of each other, not buried deep in history -- this is a UI grouping
+ * heuristic, not a security check, so approximate is fine. */
+"function findDupRow(candidates, p){\n"
+"  const dedupKey = p.mc_timestamp || p.packet_id || null;\n"
+"  if (!dedupKey) return null;\n"
+"  const text = p.text || null;\n"
+"  for (const row of candidates) if (row.dedupKey === dedupKey && row.rawText === text) return row;\n"
+"  return null;\n"
+"}\n"
+"function mergeDup(row, p){\n"
+"  row.seenCount = (row.seenCount || 1) + 1;\n"
+"  const ps = pathSummary(p);\n"
+"  if (ps && !row.seenPaths.includes(ps)) row.seenPaths.push(ps);\n"
+"  if (p.ts > row.t) row.t = p.ts;\n"
+"}\n"
+"const DUP_SCAN_WINDOW = 5;\n"
 "function noteChannelMessage(h, p, summary){\n"
 "  const c = channels[h]; if (!c) return;\n"
 "  if (!c._msgs) c._msgs = [];\n"
-"  c._msgs.unshift(buildMsgRow(p, summary));\n"
-"  if (c._msgs.length > CHAN_HIST_MSGS) c._msgs.length = CHAN_HIST_MSGS;\n"
+"  const dup = findDupRow(c._msgs.slice(0, DUP_SCAN_WINDOW), p);\n"
+"  if (dup) {\n"
+"    mergeDup(dup, p);\n"
+"  } else {\n"
+"    c._msgs.unshift(buildMsgRow(p, summary));\n"
+"    if (c._msgs.length > CHAN_HIST_MSGS) c._msgs.length = CHAN_HIST_MSGS;\n"
+"  }\n"
 "  if (selectedChannelHash === String(h)) renderChannelMessages();\n"
 "}\n"
 "let chantabRafQueued = false;\n"
@@ -2115,6 +2206,13 @@ static const char DASHBOARD_HTML[] =
 "    const hopLabel = m.pathHopCount > 0 ? `${m.pathHopCount} hop${m.pathHopCount===1?'':'s'}` : 'path';\n"
 "    const pathBtn = m.pathHex ? ` <button class=btn-mini${pathTitle} onclick=\"drawMessagePath('${m.pathHex}',${m.pathHopCount},${m.pathHashSize},${jsStrLit(m.regionScope?m.regionName:null)})\">${hopLabel}</button>` : '';\n"
 "    const pathHint = (!m.pathHex && m.path) ? `<span class=chat-path>${escHtml(m.path)}</span>` : '';\n"
+/* Dup badge: this exact message (same dedupKey -- MeshCore mc_timestamp
+ * / Meshtastic packet_id -- see findDupRow()/mergeDup()) was heard more
+ * than once via different relay paths. One row instead of N duplicate
+ * ones, with a count + hover listing the distinct paths seen. */
+"    const dupBadge = (m.seenCount > 1)\n"
+"      ? ` <span class=\"dup-badge\" title=\"heard via ${m.seenCount} paths: ${escHtml((m.seenPaths||[]).join(' | ') || 'unresolved')}\">\\u00d7${m.seenCount}</span>`\n"
+"      : '';\n"
 /* Region-scope badge (v1.10+ MeshCore flood scoping): shown next to
  * the sender name when this message's packet carried transport
  * codes. Resolved via dictionary attack (meshcore_region_dict.c,
@@ -2128,7 +2226,7 @@ static const char DASHBOARD_HTML[] =
 "    div.innerHTML = `<div class=chat-col>`\n"
 "      + `<div class=chat-meta><span class=ts>${fmtTime(m.t)}</span> <b>${senderLabel}</b>${regionBadge}</div>`\n"
 "      + `<div class=chat-bubble>${body}</div>`\n"
-"      + `<div class=chat-foot>${pathHint}${pathBtn}</div>`\n"
+"      + `<div class=chat-foot>${pathHint}${pathBtn}${dupBadge}</div>`\n"
 "      + `</div>`;\n"
 "    frag.appendChild(div);\n"
 "  }\n"
@@ -2160,7 +2258,10 @@ static const char DASHBOARD_HTML[] =
  * bare-hash "(encrypted)" bucket) still-undecrypted rows only. */
 "    const matches = (p) => c.name ? (p.channel_name === c.name) : !p.channel_name;\n"
 "    if (!c._older) c._older = [];\n"
-"    for (const p of (j.messages||[])) if (matches(p)) c._older.push(buildMsgRow(p, msgSummary(p)));\n"
+"    for (const p of (j.messages||[])) if (matches(p)) {\n"
+"      const dup = findDupRow(c._older.slice(-DUP_SCAN_WINDOW), p);\n"
+"      if (dup) mergeDup(dup, p); else c._older.push(buildMsgRow(p, msgSummary(p)));\n"
+"    }\n"
 "    if (!j.more) c._olderDone = true;\n"
 "    chantabMsgsLoadOlderStatus.textContent = (j.messages||[]).length ? '' : 'no older messages';\n"
 "  } catch (e) { chantabMsgsLoadOlderStatus.textContent = 'failed to load'; }\n"
@@ -2174,13 +2275,15 @@ static const char DASHBOARD_HTML[] =
 "// appears if it has a known real position (same lat/lon the Live map\n"
 "// plots) -- there's no sensible place to put an unpositioned node on\n"
 "// a real map, unlike the earlier canvas-based force layout this\n"
-"// replaced. Edges come from three sources: NEIGHBORINFO_APP\n"
-"// (authoritative 'I heard X with SNR Y'), the relay-hop hint\n"
-"// (header.relay_node / route_path_hex resolved to known node ids),\n"
-"// and a faint 'heard' pseudo-edge from every zero-hop transmitting node\n"
-"// (i.e. reached us with no relay in between) to this station, so even\n"
-"// traffic shows useful connectivity. Reuses the Live map's Leaflet\n"
-"// instance already loaded for it -- no new CDN dependency.\n"
+"// replaced. Edges come from two sources: NEIGHBORINFO_APP (authoritative\n"
+"// 'I heard X with SNR Y') and the relay-hop hint (route_path_hex\n"
+"// resolved to known node ids) -- the latter only from frames that\n"
+"// actually carry a path, capped to the two levels closest to us (see\n"
+"// topoNoteRelayPath()). A frame with no path (e.g. genuinely zero-hop\n"
+"// reception) contributes nothing here: without a path there's no way\n"
+"// to tell whether 'from' is a real RF neighbor or several repeaters\n"
+"// away, so it's left out rather than guessed at. Reuses the Live map's\n"
+"// Leaflet instance already loaded for it -- no new CDN dependency.\n"
 "// =============================================================\n"
 "const topoEmpty = document.getElementById('topo-empty');\n"
 "// topoNodes[id] = {id} -- membership + prune bookkeeping only, no\n"
@@ -2190,10 +2293,8 @@ static const char DASHBOARD_HTML[] =
 "const topoNodes = {}, topoEdges = {};\n"
 "const TOPO_NODE_MAX = 200; /* prune cap; nodes beyond this are dropped by recency */\n"
 "// Synthetic 'this station' node id, representing the sniffer's own\n"
-"// RX. Every frame creates a faint dashed pseudo-edge from the\n"
-"// transmitting node to this id, colored by SNR -- so even a sparse\n"
-"// mesh with no NEIGHBORINFO traffic shows useful info (what the\n"
-"// sniffer can hear and how well).\n"
+"// RX. topoNoteRelayPath() below connects it to the direct (last-hop)\n"
+"// repeater of any frame that carries a path.\n"
 "const RX_STATION_ID = '__rx_station__';\n"
 "function topoNoteEdge(srcId, dstId, snr){\n"
 "  if (!srcId || !dstId || srcId === dstId) return;\n"
@@ -2231,30 +2332,6 @@ static const char DASHBOARD_HTML[] =
 "    topoMapRenderScheduled();\n"
 "  }\n"
 "}\n"
-"// Pseudo-edge from a transmitting node to the RX station. Marked\n"
-"// kind='heard' so the renderer can dash it differently from real\n"
-"// observed-RX edges (NEIGHBORINFO_APP / relay_node hop). e.snr is a\n"
-"// running average (snrSum/snrN), not the last sample -- both the\n"
-"// edge's displayed color/tooltip and the RX centroid estimate\n"
-"// (topoGeoLatLng() below) want a stable per-neighbor value, not one\n"
-"// that jumps around with every single frame's instantaneous reading.\n"
-"function topoNoteHeard(srcId, snr){\n"
-"  if (!srcId || srcId === RX_STATION_ID) return;\n"
-"  const k = srcId < RX_STATION_ID ? srcId+'|'+RX_STATION_ID : RX_STATION_ID+'|'+srcId;\n"
-"  let e = topoEdges[k];\n"
-"  if (!e) e = topoEdges[k] = {a: srcId<RX_STATION_ID?srcId:RX_STATION_ID,\n"
-"                              b: srcId<RX_STATION_ID?RX_STATION_ID:srcId,\n"
-"                              snr: snr, snrSum: 0, snrN: 0, count: 0, kind:'heard'};\n"
-"  if (snr !== undefined && snr !== null) {\n"
-"    e.snrSum = (e.snrSum || 0) + snr;\n"
-"    e.snrN = (e.snrN || 0) + 1;\n"
-"    e.snr = e.snrSum / e.snrN;\n"
-"  }\n"
-"  e.count++; e.lastTs = Date.now()/1000;\n"
-"  topoEnsureNode(srcId); topoEnsureNode(RX_STATION_ID);\n"
-"  if (topoEmpty.style.display !== 'none') topoEmpty.style.display = 'none';\n"
-"  topoMapRenderScheduled();\n"
-"}\n"
 "// Resolve one path hop's hash bytes (hex string) to a known node id.\n"
 "// A path hop hash is literally a prefix of the relaying repeater's own\n"
 "// pubkey (confirmed against the MeshCore firmware: Identity::copyHashTo()\n"
@@ -2263,17 +2340,21 @@ static const char DASHBOARD_HTML[] =
 "// mc_derive_from_id() in feed_meshcore_json.c), so a hop hash is always\n"
 "// a byte-prefix of some known node's id once we've seen that node's\n"
 "// ADVERT. Synthetic ids (GRP_TXT/envelope-only tags) are never pubkey-\n"
-"// derived and are excluded. Only ever called with 2-byte hashes --\n"
-"// topoNoteRelayPath() below skips any path whose hash_size isn't 2, so\n"
-"// there's no 1-byte-collision noise to work around here (256 possible\n"
-"// values collide constantly once a few dozen nodes are known; 65536\n"
-"// values practically never do), and no need for a best-effort tie-break:\n"
-"// an ambiguous hop is a real 'can't tell', so it's simply dropped.\n"
+"// derived and are excluded. Only ever called with 3-byte hashes --\n"
+"// topoNoteRelayPath() below requires hash_size === 3. Shorter hashes\n"
+"// get more ambiguous the larger the known-node pool gets (1-byte's 256\n"
+"// values collide within a few dozen nodes; 2-byte's 65536 sounds safe\n"
+"// but a cross-restart --sqlite-db replay plus a well-connected region\n"
+"// can plausibly exceed that), and an ambiguous hop here doesn't fail\n"
+"// loud -- it silently resolves to the wrong real node, drawing a\n"
+"// confident-looking but false edge. No best-effort tie-break: an\n"
+"// ambiguous hop is a real 'can't tell', so it's simply dropped.\n"
 /* topoResolveHopCandidates -- every known non-synthetic node id whose
  * pubkey-prefix matches this hop's hash bytes, unfiltered. Split out
  * of topoResolveHop() (below) so the repeater-marker signal in
- * topoNoteRelayPath() can treat ALL candidates of a (rare, at 2-byte
- * hash size) ambiguous hop as "possibly relayed this" instead of only
+ * topoNoteRelayPath() can treat ALL candidates of a (rare, at
+ * hash_size === 3, but still possible) ambiguous hop as "possibly
+ * relayed this" instead of only
  * whichever one topoResolveHop()'s reject-on-ambiguity happens to
  * drop. */
 "function topoResolveHopCandidates(hex) {\n"
@@ -2292,13 +2373,25 @@ static const char DASHBOARD_HTML[] =
 "// Real relay edge, keyed in its own namespace so it never collides with\n"
 "// (or gets overwritten by) the heard/real/convo edges above, which share\n"
 "// one flat keyspace among themselves -- 'count' here means specifically\n"
-"// how many times this exact repeater-to-repeater hop was observed.\n"
-"function topoNoteRelay(srcId, dstId) {\n"
+"// how many times this exact repeater-to-repeater hop was observed. `snr`\n"
+"// is optional: only the RX<->first-level edge has a meaningful one (the\n"
+"// SNR of the actual over-the-air frame this station received -- see its\n"
+"// caller in topoNoteRelayPath()); a first-level<->second-level edge is a\n"
+"// link this station never directly participated in, so it's never\n"
+"// passed one, and e.snr stays undefined for those. Running average\n"
+"// (snrSum/snrN), not the last sample, so the displayed label is stable\n"
+"// rather than jumping around with every single frame.\n"
+"function topoNoteRelay(srcId, dstId, snr) {\n"
 "  if (!srcId || !dstId || srcId === dstId) return;\n"
 "  const pair = srcId < dstId ? srcId+'|'+dstId : dstId+'|'+srcId;\n"
 "  const k = 'relay:' + pair;\n"
 "  let e = topoEdges[k];\n"
 "  if (!e) e = topoEdges[k] = {a: srcId<dstId?srcId:dstId, b: srcId<dstId?dstId:srcId, count: 0, kind:'relay'};\n"
+"  if (snr !== undefined && snr !== null) {\n"
+"    e.snrSum = (e.snrSum || 0) + snr;\n"
+"    e.snrN = (e.snrN || 0) + 1;\n"
+"    e.snr = e.snrSum / e.snrN;\n"
+"  }\n"
 "  e.count++; e.lastTs = Date.now()/1000;\n"
 "  topoEnsureNode(srcId); topoEnsureNode(dstId);\n"
 "  if (topoEmpty.style.display !== 'none') topoEmpty.style.display = 'none';\n"
@@ -2316,11 +2409,21 @@ static const char DASHBOARD_HTML[] =
 "// resolving to known nodes (resolved << hops) vs. something else.\n"
 "const topoRelayStats = { paths: 0, hops: 0, resolved: 0 };\n"
 "function topoNoteRelayPath(p) {\n"
-"  // 2-byte hashes only: 1-byte hops collide constantly once a few dozen\n"
-"  // nodes are known (256 possible values) and 3-byte hops are rare\n"
-"  // enough in practice not to be worth the extra branch -- see\n"
-"  // topoResolveHop()'s comment above for the collision-rate reasoning.\n"
-"  if (!p.route_path_hex || !p.route_path_hash_count || p.route_path_hash_size !== 2) return;\n"
+"  // 3-byte hashes only (the protocol's max -- see topoResolveHop()'s\n"
+"  // comment for why). 2-byte's 65536 possible values sounds like a lot,\n"
+"  // but the candidate pool is the GLOBAL known-node set, not just RX's\n"
+"  // plausible neighbors -- cross-restart replay from --sqlite-db keeps\n"
+"  // every node this station has EVER seen, and a well-connected region\n"
+"  // (e.g. adjoining borders, each with their own repeaters) can put\n"
+"  // that pool well past the ~300 nodes where 2-byte collisions become\n"
+"  // a coin flip. A collision there doesn't fail loud -- it silently\n"
+"  // resolves to the WRONG real node and draws a confident-looking but\n"
+"  // false 'direct' edge to it (observed in practice: a France-based\n"
+"  // station 'directly' linked to nodes in Italy/Switzerland). 1-byte\n"
+"  // (256 values) is far worse. 3-byte's 16.7M values makes this\n"
+"  // realistically negligible at any node-pool size this dashboard\n"
+"  // will ever see.\n"
+"  if (!p.route_path_hex || !p.route_path_hash_count || p.route_path_hash_size !== 3) return;\n"
 "  const hexLen = p.route_path_hash_size * 2;\n"
 "  const hops = [];\n"
 "  for (let i = 0; i < p.route_path_hash_count; ++i) {\n"
@@ -2329,26 +2432,28 @@ static const char DASHBOARD_HTML[] =
 "  const resolved = hops.map(topoResolveHop);\n"
 "  topoRelayStats.paths++; topoRelayStats.hops += hops.length;\n"
 "  topoRelayStats.resolved += resolved.filter(Boolean).length;\n"
-"  // Only draw the last TWO relay levels: me <-> first-level repeater (the\n"
-"  // final resolved hop, who actually delivered this frame to us) and\n"
-"  // first-level <-> second-level repeater. Earlier hops are real too, but\n"
-"  // drawing the WHOLE chain back to origin on every packet clutters the\n"
-"  // graph with edges this station never actually observed directly --\n"
-"  // two levels is enough to see local structure without implying we can\n"
-"  // vouch for anything further back the path.\n"
+"  // Two levels out from RX, no further: RX <-> first-level repeater (the\n"
+"  // final resolved hop, who actually delivered this frame to us -- our\n"
+"  // direct neighbor) and first-level <-> second-level repeater (that\n"
+"  // neighbor's own neighbor). Earlier hops are real too, but drawing the\n"
+"  // WHOLE chain back to origin on every packet clutters the graph with\n"
+"  // edges this station never actually observed even indirectly.\n"
+"  // Position estimation (topoGeoLatLng()) intentionally only uses the\n"
+"  // RX<->first-level edge -- see its comment for why.\n"
 "  const last = resolved[resolved.length-1];\n"
 "  const secondLast = resolved.length >= 2 ? resolved[resolved.length-2] : null;\n"
-"  if (last) topoNoteRelay(last, RX_STATION_ID);\n"
+"  if (last) topoNoteRelay(last, RX_STATION_ID, p.snr_db);\n"
 "  if (last && secondLast) topoNoteRelay(secondLast, last);\n"
 "  // Hop-depth from us, counted from the END of the path (last hop =\n"
 "  // depth 1, closest to us; first hop = depth N, closest to origin).\n"
 "  // Track the MINIMUM ever observed -- still surfaced via hopDepth for\n"
 "  // anything else that wants it (nothing in the current render does).\n"
 /* Iterates raw hops (not `resolved`) and every candidate per hop, not
- * just topoResolveHop()'s single tie-broken winner -- see
- * topoResolveHopCandidates()'s comment above for why: an ambiguous
- * 1-byte hop's loser is still a real, plausible repeater for this
- * purpose, it just didn't win that one arbitrary tie-break. */
+ * just topoResolveHop()'s single ambiguity-reject result -- see
+ * topoResolveHopCandidates()'s comment above for why: on a rare
+ * ambiguous hop (hash_size === 3, so this is rare), each candidate is
+ * repeater for hop-depth purposes even though topoResolveHop() drops
+ * all of them for the (stricter) edge-drawing use above. */
 "  for (let i = 0; i < hops.length; ++i) {\n"
 "    const depth = hops.length - i;\n"
 "    for (const id of topoResolveHopCandidates(hops[i])) {\n"
@@ -2378,28 +2483,23 @@ static const char DASHBOARD_HTML[] =
  *
  * For RX_STATION_ID: the sniffer's own GPS fix (stationMarker, only
  * present with --gpsd or --rx-lat/--rx-lon) when known. Without one,
- * this falls back to an estimate built ONLY from confirmed last-hop
- * repeaters: topoEdges entries with kind='relay' touching
- * RX_STATION_ID, which topoNoteRelayPath() adds specifically for the
- * FINAL resolved hop of a MeshCore route_path_hex -- i.e. the
+ * this falls back to an estimate built ONLY from confirmed direct
+ * (first-level) repeaters: topoEdges entries with kind='relay'
+ * touching RX_STATION_ID, which topoNoteRelayPath() adds specifically
+ * for the FINAL resolved hop of a MeshCore route_path_hex -- i.e. the
  * repeater that actually delivered a frame straight to our receiver.
- * Deliberately NOT built from 'heard' edges: those fire on any
- * zero-hop frame from any node (see topoNoteHeard's caller), which
- * includes companion/phone nodes that can be anywhere and move, and
- * -- before that call site was fixed to check route_path_hash_count
- * -- used to fire on relayed frames too, anchoring the estimate on
- * nodes that were never actually our RF neighbor. A resolved last-hop
- * repeater is real mesh infrastructure with a known fixed position
- * that demonstrably reached us with nothing in between, so it's a
- * sturdier anchor even though it arrives less often than raw 'heard'
- * edges. Excludes companion/phone nodes (nodeKind() 'people' --
- * MeshCore's CHAT type) as a defensive filter, though those normally
- * don't relay. Weighted by how many times each repeater has been
- * observed as the last hop (e.count) so a consistently-confirmed
- * neighbor pulls the estimate toward it more than a one-off. Not a
- * real fix, just good enough to keep those edges visible; callers
- * that show this to the user (see topoMapRender()) label it as
- * estimated. */
+ * Never the second-level repeater topoNoteRelayPath() also draws (that
+ * edge doesn't touch RX_STATION_ID at all, so it's naturally excluded
+ * here) -- position estimation uses exactly one hop out, nothing more.
+ * A frame with no path contributes no candidate at all: there's no
+ * reliable way to say who was our real RF neighbor without one.
+ * Excludes companion/phone nodes (nodeKind() 'people' -- MeshCore's
+ * CHAT type) as a defensive filter, though those normally don't relay.
+ * Weighted by how many times each repeater has been observed as the
+ * last hop (e.count) so a consistently-confirmed neighbor pulls the
+ * estimate toward it more than a one-off. Not a real fix, just good
+ * enough to keep those edges visible; callers that show this to the
+ * user (see topoMapRender()) label it as estimated. */
 "function topoGeoLatLng(id) {\n"
 "  if (id !== RX_STATION_ID) {\n"
 "    const m = markers[id];\n"
@@ -2431,6 +2531,16 @@ static const char DASHBOARD_HTML[] =
 "  const b = 80;\n"
 "  return `rgba(${r},${g},${b},${alpha||0.7})`;\n"
 "}\n"
+"// Deterministic color from a node id -- same repeater always gets the\n"
+"// same hue across renders, and distinct repeaters get visually\n"
+"// distinct ones, without maintaining a color registry. Used to color\n"
+"// each first-level repeater's own first-level<->second-level fan-out\n"
+"// edges so they read as belonging to that repeater at a glance.\n"
+"function topoRepeaterColor(id){\n"
+"  let h = 0;\n"
+"  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;\n"
+"  return `hsla(${h % 360}, 65%, 60%, 0.85)`;\n"
+"}\n"
 "function topoPrune(){\n"
 "  const ids = Object.keys(topoNodes);\n"
 "  if (ids.length <= TOPO_NODE_MAX) return;\n"
@@ -2448,11 +2558,10 @@ static const char DASHBOARD_HTML[] =
 "    }\n"
 "  }\n"
 "}\n"
-"function topoNodeRadius(id){\n"
-"  const n = nodes[id];\n"
-"  const f = (n && n.frames) || 1;\n"
-"  return Math.min(14, 4 + Math.log2(1 + f) * 1.4);\n"
-"}\n"
+"// Fixed, not scaled by frame count -- a constantly resizing node as\n"
+"// traffic accumulates made the graph harder to read at a glance, not\n"
+"// easier.\n"
+"const TOPO_NODE_RADIUS = 7;\n"
 "const topoEdgeLayer = L.layerGroup().addTo(topoMap);\n"
 "const topoNodeLayer = L.layerGroup().addTo(topoMap);\n"
 "let topoMapRafQueued = false;\n"
@@ -2469,57 +2578,127 @@ static const char DASHBOARD_HTML[] =
  * with exchange count (relay edges) the same way the old canvas
  * renderer did, capped/log-scaled so one very chatty pair can't dwarf
  * the rest of the drawing. */
+/* topoRelayDepths -- hard ceiling on how far the Topology graph's
+ * relay chain can ever visually extend from RX_STATION_ID, computed
+ * fresh at every render by walking the CURRENT 'relay' edge set.
+ * topoNoteRelayPath() already limits each individual event to at most
+ * 2 edges (RX<->first-level, first-level<->second-level), but a long
+ * session accumulates edges from MANY different events/repeaters, and
+ * a node that is second-level via one path can independently turn out
+ * to also be first-level via a completely different path -- correct
+ * on its own, but nothing upstream re-checks the COMBINED graph. This
+ * is that check: BFS from RX_STATION_ID, capped at depth 2, so no
+ * matter how topoEdges accumulated, rendering can never show a chain
+ * deeper than RX -> first-level -> second-level. Returns {id: depth}
+ * for only the ids within that radius. */
+"function topoRelayDepths(){\n"
+"  const depth = {}; depth[RX_STATION_ID] = 0;\n"
+"  let frontier = [RX_STATION_ID];\n"
+"  for (let d = 1; d <= 2 && frontier.length; ++d) {\n"
+"    const next = [];\n"
+"    for (const k in topoEdges) {\n"
+"      const e = topoEdges[k];\n"
+"      if (e.kind !== 'relay') continue;\n"
+"      if (frontier.includes(e.a) && !(e.b in depth)) { depth[e.b] = d; next.push(e.b); }\n"
+"      if (frontier.includes(e.b) && !(e.a in depth)) { depth[e.a] = d; next.push(e.a); }\n"
+"    }\n"
+"    frontier = next;\n"
+"  }\n"
+"  return depth;\n"
+"}\n"
 "function topoMapRender(){\n"
 "  topoEdgeLayer.clearLayers();\n"
 "  topoNodeLayer.clearLayers();\n"
 "  const posCache = {};\n"
 "  const posOf = (id) => (id in posCache) ? posCache[id] : (posCache[id] = topoGeoLatLng(id));\n"
+"  const relayDepth = topoRelayDepths();\n"
+"  const edgeOk = (e) => e.kind !== 'relay' || (e.a in relayDepth && e.b in relayDepth);\n"
 "  const ids = new Set();\n"
-"  for (const k in topoEdges) { ids.add(topoEdges[k].a); ids.add(topoEdges[k].b); }\n"
+"  for (const k in topoEdges) { if (edgeOk(topoEdges[k])) { ids.add(topoEdges[k].a); ids.add(topoEdges[k].b); } }\n"
 "  let edgesShown = 0;\n"
 "  for (const k in topoEdges){\n"
 "    const e = topoEdges[k];\n"
+"    if (!edgeOk(e)) continue;\n"
 "    const pa = posOf(e.a), pb = posOf(e.b);\n"
 "    if (!pa || !pb) continue;\n"
 "    edgesShown++;\n"
-"    let color, weight, dash = null, tip;\n"
+"    let color, weight, dash = null, tip, rxSnrLabel = null;\n"
 "    if (e.kind === 'relay') {\n"
-"      weight = Math.min(7, 1.5 + Math.log2(1 + e.count) * 1.2);\n"
-"      color = 'rgba(74,222,128,0.75)';\n"
-"      tip = `relay path, ${e.count} exchange(s)`;\n"
+"      weight = 2.5; // fixed -- not scaled by exchange count, see TOPO_NODE_RADIUS's comment\n"
+"      const touchesRx = e.a === RX_STATION_ID || e.b === RX_STATION_ID;\n"
+"      if (touchesRx) {\n"
+"        // The RX<->first-level edge is the only one with a meaningful\n"
+"        // SNR (see topoNoteRelay()'s comment) -- give it a permanent\n"
+"        // on-map label instead of a hover-only tooltip.\n"
+"        color = 'rgba(74,222,128,0.75)';\n"
+"        if (e.snr !== undefined && e.snr !== null) rxSnrLabel = `${e.snr.toFixed(1)} dB`;\n"
+"        tip = rxSnrLabel ? `SNR ${rxSnrLabel}, ${e.count} exchange(s)` : `relay path, ${e.count} exchange(s)`;\n"
+"      } else {\n"
+"        // First-level <-> second-level: dashed, colored by whichever\n"
+"        // endpoint IS the first-level repeater (depth 1 from RX, per\n"
+"        // topoRelayDepths()) so every repeater's own fan-out reads as\n"
+"        // a distinct color at a glance instead of all edges blurring\n"
+"        // into the same green as the RX<->first-level edges above.\n"
+"        dash = '6,4';\n"
+"        const hubId = relayDepth[e.a] === 1 ? e.a : e.b;\n"
+"        color = topoRepeaterColor(hubId);\n"
+"        tip = `relay path, ${e.count} exchange(s)`;\n"
+"      }\n"
 "    } else if (e.kind === 'convo') {\n"
 "      weight = 2; color = 'rgba(251,191,36,0.75)';\n"
 "      tip = `conversation, ${e.count} message(s)`;\n"
 "    } else {\n"
-"      weight = 1.5; color = topoSnrColor(e.snr, e.kind==='heard' ? 0.4 : 0.65);\n"
-"      if (e.kind === 'heard') dash = '4,3';\n"
+"      // kind === 'real': NEIGHBORINFO_APP-reported edge.\n"
+"      weight = 1.5; color = topoSnrColor(e.snr, 0.65);\n"
 "      tip = (e.snr !== undefined && e.snr !== null) ? `SNR ${e.snr.toFixed(1)} dB` : 'observed';\n"
 "    }\n"
 "    const line = L.polyline([pa, pb], {color, weight, opacity:1, dashArray: dash}).addTo(topoEdgeLayer);\n"
-"    line.bindTooltip(tip, {sticky:true});\n"
+"    if (rxSnrLabel) {\n"
+"      line.bindTooltip(rxSnrLabel, {permanent:true, direction:'center', className:'topo-snr-label'});\n"
+"    } else {\n"
+"      line.bindTooltip(tip, {sticky:true});\n"
+"    }\n"
 "    line.on('mouseover', () => line.setStyle({weight: weight + 1.5}));\n"
 "    line.on('mouseout', () => line.setStyle({weight}));\n"
 "  }\n"
 "  let nodesShown = 0;\n"
+"  const shownPositions = [];\n"
 "  for (const id of ids) {\n"
 "    const pos = posOf(id);\n"
 "    if (!pos) continue;\n"
 "    nodesShown++;\n"
+"    shownPositions.push(pos);\n"
 "    const isStation = id === RX_STATION_ID;\n"
 "    let marker, label;\n"
 "    if (isStation) {\n"
 "      marker = L.circleMarker(pos, {radius:9, color:'#38bdf8', weight:2, fillColor:'#0c4a6e', fillOpacity:0.85}).addTo(topoNodeLayer);\n"
 "      label = stationMarker ? 'RX station (this sniffer)' : 'RX station (estimated -- no GPS fix, centroid of confirmed last-hop repeaters)';\n"
+"      marker.bindTooltip(label, {direction:'top', offset:[0,-6]});\n"
 "    } else {\n"
 "      const n = nodes[id];\n"
 "      const kind = nodeKind(n);\n"
 "      marker = kind === 'room'\n"
 "        ? L.marker(pos, {icon: ROOM_ICON}).addTo(topoNodeLayer)\n"
-"        : L.circleMarker(pos, {...NODE_STYLES[kind], radius: topoNodeRadius(id)}).addTo(topoNodeLayer);\n"
+"        : L.circleMarker(pos, {...NODE_STYLES[kind], radius: TOPO_NODE_RADIUS}).addTo(topoNodeLayer);\n"
 "      label = (n && n.name) ? n.name : id;\n"
 "      marker.on('click', () => openDrawer(id));\n"
+"      // Permanent, not hover-only -- printing the repeater's name\n"
+"      // directly on the map is the point of this graph; a name you\n"
+"      // only see on hover isn't really legible at a glance.\n"
+"      marker.bindTooltip(label, {permanent:true, direction:'top', offset:[0,-6], className:'node-id-label'});\n"
 "    }\n"
-"    marker.bindTooltip(label, {direction:'top', offset:[0,-6]});\n"
+"  }\n"
+/* One-time auto-fit, the first time this graph has anything to show
+ * (RX plus at least one positioned repeater) -- not on every render,
+ * which runs continuously as new edges/nodes trickle in and would
+ * otherwise keep yanking the view out from under an operator who's
+ * mid-pan/zoom inspecting something. topoFitBoundsDone latches this
+ * off permanently after the first fit; nothing currently resets it
+ * (matches the Live map's own one-shot `markers{}.length === 1` /
+ * bootstrap fitBounds conventions above). */
+"  if (!topoFitBoundsDone && shownPositions.length > 1) {\n"
+"    topoMap.fitBounds(shownPositions, {maxZoom: 13, padding: [40, 40]});\n"
+"    topoFitBoundsDone = true;\n"
 "  }\n"
 "  const relayStatsEl = document.getElementById('topo-relay-stats');\n"
 "  if (relayStatsEl) {\n"
@@ -2550,8 +2729,46 @@ static const char DASHBOARD_HTML[] =
 "    topoEmpty.style.display = 'none';\n"
 "  }\n"
 "}\n"
+/* topoLoadHistory -- one-shot backfill of the relay graph from
+ * --sqlite-db (see /api/topology, db_sqlite_query_topology_json()),
+ * so opening/refreshing the Topology tab doesn't start blank and
+ * rebuild purely from whatever traffic happens to arrive after that.
+ * Awaits nodesBootstrapPromise first: topoNoteRelayPath()'s hop
+ * resolution can only succeed against nodes already in `nodes{}`, and
+ * /api/nodes bootstraps the full historical set -- running before
+ * that would resolve fewer hops than the same replay run after it. */
+"let topoHistoryLoaded = false;\n"
+"let topoFitBoundsDone = false; // see topoMapRender()'s auto-fit comment above\n"
+"async function topoLoadHistory(){\n"
+"  if (topoHistoryLoaded) return;\n"
+"  topoHistoryLoaded = true;\n"
+"  try {\n"
+"    await nodesBootstrapPromise;\n"
+"    const r = await fetch('/api/topology');\n"
+"    if (!r.ok) { console.error('topology history: /api/topology HTTP', r.status); return; }\n"
+"    const data = await r.json();\n"
+"    const events = data.events || [];\n"
+/* hash_size !== 3 is rejected inside topoNoteRelayPath() itself before
+ * it touches topoRelayStats, so count it here instead -- otherwise a
+ * region whose repeaters mostly use 1-/2-byte path hashes (common:
+ * shorter hashes cost less airtime) silently replays zero edges with
+ * no visible reason why, right after fetching a non-empty response. */
+"    const skippedHashSize = events.filter(p => p.route_path_hash_size !== 3).length;\n"
+"    const before = { hops: topoRelayStats.hops, resolved: topoRelayStats.resolved };\n"
+"    for (const p of events) topoNoteRelayPath(p);\n"
+"    const hopsAdded = topoRelayStats.hops - before.hops;\n"
+"    const resolvedAdded = topoRelayStats.resolved - before.resolved;\n"
+"    console.log(`topology history: ${events.length} row(s) fetched, ` +\n"
+"      `${events.length - skippedHashSize} had a 3-byte path hash (usable), ` +\n"
+"      `${resolvedAdded}/${hopsAdded} of those hops resolved to a known node.` +\n"
+"      (skippedHashSize && events.length === skippedHashSize\n"
+"        ? ' NONE had a 3-byte hash -- this region likely uses shorter path hashes; nothing to show.'\n"
+"        : ''));\n"
+"  } catch(e) { console.error('topology history load failed:', e); }\n"
+"}\n"
 "function topoStart(){\n"
 "  setTimeout(() => { topoMap.invalidateSize(); topoMapRenderScheduled(); }, 60);\n"
+"  topoLoadHistory();\n"
 "}\n"
 "window.addEventListener('resize', ()=>{ if (document.getElementById('topology').classList.contains('active')) topoMap.invalidateSize(); });\n"
 "window.addEventListener('resize', ()=>{ if (document.getElementById('live').classList.contains('active')) map.invalidateSize(); });\n"
@@ -2742,24 +2959,15 @@ static const char DASHBOARD_HTML[] =
 "                    (p.payload_crc_ok === false);\n"
 "  const showUntrusted = document.getElementById('showUntrusted');\n"
 "  if (untrusted && !(showUntrusted && showUntrusted.checked)) return;\n"
-"  // Topology heard-edge: draws a faint pseudo-edge from the source node\n"
-"  // straight to the synthetic RX station, colored by SNR. Only valid when\n"
-"  // this frame genuinely reached us with zero hops -- p.from is always\n"
-"  // the packet's ORIGINATING node, not whoever actually transmitted the\n"
-"  // copy we captured, so for a relayed MeshCore frame (route_path_hash_\n"
-"  // count > 0) drawing this edge would falsely claim we heard the origin\n"
-"  // directly when we actually heard it via one or more repeaters (see\n"
-"  // topoNoteRelayPath for the real last-hop edge in that case).\n"
-"  const mcRelayed = p.protocol === 'meshcore' && p.route_path_hash_count > 0;\n"
-"  if (!mcRelayed) topoNoteHeard(p.from, p.snr_db);\n"
 "  if (p.to) topoNoteAddressed(p.from, p.to);\n"
-"  // Real relay-tree edges: unlike the heard-pseudo-edge above (which\n"
-"  // just connects the packet's nominal sender straight to us, ignoring\n"
-"  // any relaying), route_path_hex is the packet's ACTUAL hop-by-hop\n"
-"  // repeater trail. Runs for every event carrying a path -- including\n"
-"  // envelope-only REQ/RESPONSE/PATH/TXT_MSG, which have no resolvable\n"
-"  // 'from' of their own but still traversed real repeaters. See\n"
-"  // topoNoteRelayPath() below.\n"
+"  // Real relay-tree edges: route_path_hex is the packet's ACTUAL\n"
+"  // hop-by-hop repeater trail, so this is the only source of Topology\n"
+"  // edges for anything MeshCore reception-related -- a frame with no\n"
+"  // path contributes nothing (see topoNoteRelayPath() below and the\n"
+"  // Topology-tab intro comment above for why). Runs for every event\n"
+"  // carrying a path -- including envelope-only REQ/RESPONSE/PATH/\n"
+"  // TXT_MSG, which have no resolvable 'from' of their own but still\n"
+"  // traversed real repeaters. See topoNoteRelayPath() below.\n"
 "  topoNoteRelayPath(p);\n"
 /* Live map: animate the same relay path across the Leaflet map itself
  * (traceLivePath(), defined above near placeMarker/pulseNode) -- a
@@ -2873,13 +3081,19 @@ static const char DASHBOARD_HTML[] =
 "    }\n"
 "  }\n"
 "  if (Math.random() < 0.05) topoPrune();\n"
-"  // Slot ids 1019..1023 are focused-pool / manual-focus workers (see\n"
-"  // CHANNELIZER_MAX_CHANNELS in channelizer.h); flag those so the\n"
-"  // operator can tell which frames the deep-decode path delivered.\n"
-"  const focusedBadge = (typeof p.slot_id === 'number' && p.slot_id >= 1019)\n"
-"    ? '<span class=muted style=\"color:#38bdf8\">[focused]</span> ' : '';\n"
+/* Frame type badge: p.port_name is Meshtastic-only (mesh_port_name()
+ * in feed.c) -- for MeshCore it's always empty, so the old separate
+ * <span class=port> further down this line never showed anything
+ * useful there. p.mc_type covers MeshCore (GRP_TXT/ADVERT/etc.), so
+ * this one badge works for both protocols; replaces the previous
+ * [focused] tag (whether this came from the deep-decode focused pool,
+ * slot_id 1019..1023 -- see CHANNELIZER_MAX_CHANNELS in
+ * channelizer.h), an internal decode-path detail an operator has no
+ * use for compared to just knowing what kind of frame this is. */
+"  const frameType = p.mc_type || p.port_name;\n"
+"  const typeBadge = frameType ? `<span class=muted style=\"color:#38bdf8\">[${frameType}]</span> ` : '';\n"
 "  const summary = msgSummary(p);\n"
-"  if (summary) pushTo(msgsEl, `${focusedBadge}<b>${msgFromLabel(p,n,id)}</b> <span class=muted>${p.channel_name||''}</span> <span class=port>${p.port_name||''}</span>: ${summary}`, p.ts);\n"
+"  if (summary) pushTo(msgsEl, `${typeBadge}<b>${msgFromLabel(p,n,id)}</b> <span class=muted>${p.channel_name||''}</span>: ${summary}`, p.ts);\n"
 "  if (p.channel_hash !== undefined) { noteChannelMessage(chanKey(p.channel_hash, p.channel_name), p, summary); refreshChannelsTab(); }\n"
 "  if (p.atak_callsign) pushTo(discEl, `<span class=atak>ATAK ${p.atak_callsign} (${p.atak_team}/${p.atak_role})${p.atak_chat?' chat: '+p.atak_chat:''}</span>`, p.ts);\n"
 "  if (p.mc_type === 'CONTROL' && p.ctl_subtype === 'NODE_DISCOVER_RESP') pushTo(discEl, `<span class=disc>discovery: ${escHtml(n.name || id)}</span>`, p.ts);\n"
@@ -3019,7 +3233,7 @@ static const char DASHBOARD_HTML[] =
 "    refreshNodes();\n"
 "  } catch(e) {}\n"
 "}\n"
-"bootstrapNodesFromApi();\n"
+"const nodesBootstrapPromise = bootstrapNodesFromApi();\n"
 /* bootstrapChannelsFromApi -- Channels-tab counterpart to
  * bootstrapNodesFromApi() above: `channels{}` is likewise live-traffic-
  * only in memory, built up only from SSE packet/CHAN_SNR/discovery
@@ -3760,6 +3974,29 @@ static void handle_api_telemetry(int fd, const char *req)
     free(body);
 }
 
+/* GET /api/topology?before=<ts>&limit=<n> -- Topology tab bootstrap,
+ * bypassing the browser's live-traffic-only in-memory graph entirely
+ * so it can rebuild from history instead of starting blank on every
+ * page load (see db_sqlite_query_topology_json). Same paging shape as
+ * /api/telemetry above. */
+static void handle_api_topology(int fd, const char *req)
+{
+    char qs[512] = {0}, beforebuf[32] = {0}, limbuf[16] = {0};
+    extract_query_string(req, qs, sizeof(qs));
+
+    double before_ts = 0.0;
+    long limit = API_TOPOLOGY_DEFAULT_LIMIT;
+    if (query_get(qs, "before", beforebuf, sizeof(beforebuf))) before_ts = atof(beforebuf);
+    if (query_get(qs, "limit", limbuf, sizeof(limbuf))) limit = strtol(limbuf, NULL, 10);
+    if (limit <= 0) limit = API_TOPOLOGY_DEFAULT_LIMIT;
+    if (limit > API_TOPOLOGY_MAX_LIMIT) limit = API_TOPOLOGY_MAX_LIMIT;
+
+    char *body = db_sqlite_query_topology_json(before_ts, (int)limit);
+    if (!body) { send_response(fd, 503, "{\"error\":\"sqlite not configured\"}"); return; }
+    send_response(fd, 200, body);
+    free(body);
+}
+
 /* GET /api/nodes -- dashboard bootstrap-on-load. Combines
  * db_sqlite_query_nodes_json() (names, from the `nodes` table) and
  * db_sqlite_query_positions_json() (each node's last known lat/lon,
@@ -3902,7 +4139,8 @@ static void *web_thread(void *arg)
         else if (strncmp(buf, "GET /events", 11) == 0) promote_to_sse(fd);
         else if (strncmp(buf, "GET /api/messages", 17) == 0) handle_api_messages(fd, buf);
         else if (strncmp(buf, "GET /api/node-history", 21) == 0) handle_api_node_history(fd, buf);
-    else if (strncmp(buf, "GET /api/telemetry", 19) == 0) handle_api_telemetry(fd, buf);
+    else if (strncmp(buf, "GET /api/telemetry", 18) == 0) handle_api_telemetry(fd, buf);
+        else if (strncmp(buf, "GET /api/topology", 17) == 0) handle_api_topology(fd, buf);
         else if (strncmp(buf, "GET /api/nodes", 14) == 0) handle_api_nodes(fd, buf);
         else if (strncmp(buf, "GET /api/meshcore-channels", 26) == 0) handle_api_meshcore_channels(fd, buf);
         else if (strncmp(buf, "GET /api/stats", 14) == 0) handle_api_stats(fd, buf);
