@@ -111,7 +111,7 @@ int meshcore_redecrypt_channel(uint8_t channel_hash, const meshcore_channelset_t
         char buf[2048];
         jw_t j;
         jw_init(&j, buf, sizeof(buf));
-        feed_serialize_event_meshcore(&j, &ev, NULL, rows[i].ts);
+        feed_serialize_event_meshcore(&j, &ev, NULL, rows[i].ts, false, 0, 0, 0);
 
         if (db_sqlite_apply_redecrypt(rows[i].id, ev.channel_name, ev.mc_text, j.buf, j.len))
             ++fixed;

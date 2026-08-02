@@ -56,7 +56,7 @@ static void test_grp_txt_text_and_from_visible(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, false, 0, 0, 0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"text\":\"Paquito: hello mesh\"") != NULL,
@@ -85,7 +85,7 @@ static void test_grp_txt_undecrypted_no_text(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, false, 0, 0, 0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"text\"") == NULL,
@@ -111,7 +111,7 @@ static void test_advert_node_and_position_visible(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, false, 0, 0, 0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"from\":\"!") != NULL,
@@ -142,6 +142,37 @@ static void test_advert_node_and_position_visible(void)
     }
 }
 
+static void test_station_position_emitted_only_when_have_station(void)
+{
+    mesh_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.is_meshcore     = true;
+    ev.decrypted       = true;
+    ev.mc_payload_type = MC_PAYLOAD_ACK;
+    ev.slot_id         = -1;
+    strncpy(ev.mc_type_name, "ACK", sizeof(ev.mc_type_name) - 1);
+
+    char buf[2048];
+    jw_t j;
+
+    jw_init(&j, buf, sizeof(buf));
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, true, 43.7417194, 4.2230846, 12.0);
+    buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
+    CHECK(strstr(buf, "\"station_lat\":43.7417194") != NULL,
+          "have_station=true: JSON contains 'station_lat'");
+    CHECK(strstr(buf, "\"station_lon\":4.2230846") != NULL,
+          "have_station=true: JSON contains 'station_lon'");
+    CHECK(strstr(buf, "\"station_alt_m\"") != NULL,
+          "have_station=true with nonzero alt: JSON contains 'station_alt_m'");
+
+    jw_init(&j, buf, sizeof(buf));
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, false, 43.7417194, 4.2230846, 12.0);
+    buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
+    CHECK(strstr(buf, "\"station_lat\"") == NULL,
+          "have_station=false: no 'station_lat' even though lat/lon args are non-garbage "
+          "(mirrors a retroactive recover tool passing false with 0/0/0)");
+}
+
 static void test_ack_has_no_from(void)
 {
     /* ACK / unknown frames carry no identity info; must not fabricate
@@ -157,7 +188,7 @@ static void test_ack_has_no_from(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, false, 0, 0, 0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"from\"") == NULL,
@@ -189,7 +220,7 @@ static void test_control_discover_resp_node_visible(void)
     char buf[2048];
     jw_t j;
     jw_init(&j, buf, sizeof(buf));
-    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0);
+    feed_serialize_event_meshcore(&j, &ev, NULL, 0.0, false, 0, 0, 0);
     buf[j.len < sizeof(buf) ? j.len : sizeof(buf) - 1] = 0;
 
     CHECK(strstr(buf, "\"from\":\"!") != NULL,
@@ -277,6 +308,7 @@ int main(void)
     test_control_discover_resp_node_visible();
     test_observer_schema_flood();
     test_observer_schema_direct_path();
+    test_station_position_emitted_only_when_have_station();
 
     if (failures) {
         fprintf(stderr, "\n%d check(s) failed\n", failures);

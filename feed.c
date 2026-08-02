@@ -59,8 +59,25 @@ static int        g_udp_feed_count = 0;
 
 static void serialize_event(jw_t *j, const mesh_event_t *ev)
 {
+    /* Station GPS: gpsd_get_fix() (gpsd.c) already checks --rx-lat/
+     * --rx-lon FIRST regardless of --gpsd, returning them as an
+     * always-fresh (age 0s) fix -- it's safe to call unconditionally
+     * (a static, zero-initialized mutex-guarded fallback when neither
+     * is configured), so no opt_gpsd_endpoint/opt_rx_lat gate is
+     * needed here; that used to gate this entire block on
+     * opt_gpsd_endpoint alone, silently dropping station position
+     * for a --rx-lat/--rx-lon-only (no --gpsd) deployment. Computed
+     * once and shared by both protocol paths below -- MeshCore's
+     * previously had no station-position support at all. 30 s
+     * freshness window: gpsd updates ~1 Hz typical, so anything older
+     * means we've lost fix and the position is stale. */
+    double station_lat = 0, station_lon = 0, station_alt = 0, station_age = 0;
+    bool have_station = gpsd_get_fix(&station_lat, &station_lon, &station_alt, &station_age)
+                      && station_age < 30.0;
+
     if (ev->is_meshcore) {
-        feed_serialize_event_meshcore(j, ev, opt_station_id, 0.0);
+        feed_serialize_event_meshcore(j, ev, opt_station_id, 0.0,
+                                      have_station, station_lat, station_lon, station_alt);
         return;
     }
 
@@ -74,16 +91,10 @@ static void serialize_event(jw_t *j, const mesh_event_t *ev)
     double ts = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
     jw_field_f64(j, "ts", ts);
 
-    /* Station GPS (when --gpsd is configured and a recent fix is in).
-     * 30 s freshness window: gpsd updates ~1 Hz typical, so anything
-     * older than that means we've lost fix and the position is stale. */
-    if (opt_gpsd_endpoint) {
-        double s_lat, s_lon, s_alt = 0, s_age = 0;
-        if (gpsd_get_fix(&s_lat, &s_lon, &s_alt, &s_age) && s_age < 30.0) {
-            jw_field_f64(j, "station_lat", s_lat);
-            jw_field_f64(j, "station_lon", s_lon);
-            if (s_alt != 0.0) jw_field_f32(j, "station_alt_m", (float)s_alt);
-        }
+    if (have_station) {
+        jw_field_f64(j, "station_lat", station_lat);
+        jw_field_f64(j, "station_lon", station_lon);
+        if (station_alt != 0.0) jw_field_f32(j, "station_alt_m", (float)station_alt);
     }
 
     /* Header */

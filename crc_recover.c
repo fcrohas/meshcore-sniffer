@@ -129,7 +129,7 @@ int meshcore_crc_recover_scan(const meshcore_channelset_t *channels, crc_recover
         char buf[2048];
         jw_t j;
         jw_init(&j, buf, sizeof(buf));
-        feed_serialize_event_meshcore(&j, &ev, NULL, rows[i].ts);
+        feed_serialize_event_meshcore(&j, &ev, NULL, rows[i].ts, false, 0, 0, 0);
 
         if (db_sqlite_apply_crc_recover(rows[i].id, bits, ev.decrypted,
                                          ev.channel_name, ev.mc_text, j.buf, j.len)) {

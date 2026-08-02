@@ -115,7 +115,7 @@ int meshcore_control_recover_scan(control_recover_stats_t *stats)
         char buf[2048];
         jw_t j;
         jw_init(&j, buf, sizeof(buf));
-        feed_serialize_event_meshcore(&j, &ev, NULL, rows[i].ts);
+        feed_serialize_event_meshcore(&j, &ev, NULL, rows[i].ts, false, 0, 0, 0);
 
         if (db_sqlite_apply_control_recover(rows[i].id, node_id, j.buf, j.len)) {
             ++local.resolved;

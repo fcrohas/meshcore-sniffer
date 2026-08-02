@@ -22,8 +22,23 @@
  * wall-clock time, matching live capture. A positive value is used
  * verbatim instead -- for meshcore_redecrypt.c re-serializing a
  * historically-stored row whose original capture time must be
- * preserved (not the time the retroactive decrypt happens to run). */
+ * preserved (not the time the retroactive decrypt happens to run).
+ *
+ * `have_station`/`station_lat`/`station_lon`/`station_alt_m`: this
+ * station's own position (from --gpsd or --rx-lat/--rx-lon), same
+ * computation feed.c's Meshtastic path already does -- passed in
+ * rather than read from gpsd.h/options.h globals for the same
+ * standalone-testability reason as `station_id` above. All five
+ * retroactive-recover callers (meshcore_redecrypt.c, crc_recover.c,
+ * meshcore_region_recover.c, meshcore_lpp_recover.c,
+ * meshcore_control_recover.c) correctly pass have_station=false:
+ * they're re-serializing a HISTORICAL row, and this process's
+ * current station position has no bearing on where the station was
+ * when that row was originally captured. station_alt_m is only
+ * emitted when nonzero, matching feed.c's own convention. */
 void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
-                                   const char *station_id, double ts_override);
+                                   const char *station_id, double ts_override,
+                                   bool have_station, double station_lat,
+                                   double station_lon, double station_alt_m);
 
 #endif /* FEED_MESHCORE_JSON_H */

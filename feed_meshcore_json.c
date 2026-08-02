@@ -74,7 +74,9 @@ static uint32_t mc_derive_from_id(const mesh_event_t *ev)
 }
 
 void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
-                                   const char *station_id, double ts_override)
+                                   const char *station_id, double ts_override,
+                                   bool have_station, double station_lat,
+                                   double station_lon, double station_alt_m)
 {
     jw_open(j);
     if (station_id) jw_field_str(j, "station", station_id);
@@ -86,6 +88,16 @@ void feed_serialize_event_meshcore(jw_t *j, const mesh_event_t *ev,
         ts = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
     }
     jw_field_f64(j, "ts", ts);
+
+    /* Station GPS, mirroring feed.c's Meshtastic path -- see this
+     * function's doc comment in feed_meshcore_json.h for why this
+     * arrives as parameters instead of reading gpsd.h/options.h
+     * globals directly. */
+    if (have_station) {
+        jw_field_f64(j, "station_lat", station_lat);
+        jw_field_f64(j, "station_lon", station_lon);
+        if (station_alt_m != 0.0) jw_field_f32(j, "station_alt_m", (float)station_alt_m);
+    }
 
     jw_field_str(j, "protocol",     "meshcore");
     jw_field_str(j, "mc_type",      ev->mc_type_name[0] ? ev->mc_type_name : "UNKNOWN");
