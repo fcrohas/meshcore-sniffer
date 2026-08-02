@@ -129,6 +129,38 @@ char *db_sqlite_query_node_events_json(const char *node_id, double before_ts, in
  * valid {"telemetry":[],"more":false}, not NULL. */
 char *db_sqlite_query_telemetry_json(double before_ts, int limit);
 
+/* On-demand topology history for the Topology tab: without this, the
+ * relay graph (topoNoteRelayPath() in web.c) only ever sees events
+ * since the current page load, so a freshly opened/refreshed tab
+ * starts empty and has to rebuild purely from live traffic. Queries
+ * the `events` table for rows with route_path_hex IS NOT NULL --
+ * already MeshCore-only and path-only by construction, since
+ * bind_route_path_hex() (this file) only ever sets that column for a
+ * MeshCore event whose header path was non-empty -- newest first.
+ * Replaying these is also strictly BETTER than the original live
+ * resolution for a given row: topoResolveHop() in web.c only
+ * resolves a hop hash against whatever nodes were already known at
+ * the moment that event first arrived, but replay happens after
+ * /api/nodes has bootstrapped the FULL known-node set, so a hop that
+ * failed to resolve live (because that repeater's ADVERT hadn't been
+ * seen yet) can resolve correctly on replay.
+ *
+ * Same paging shape as db_sqlite_query_messages_json()/_telemetry_json()
+ * above: before_ts <= 0 means "no upper bound"; limit is clamped by
+ * the caller.
+ *
+ * Returns a malloc'd, NUL-terminated JSON string of the form
+ *   {"events":[<json>,...],"more":bool}
+ * where each array element is the verbatim stored `json` column
+ * value (same shape as an SSE event line) -- the caller feeds each
+ * one straight into its existing topoNoteRelayPath(), no server-side
+ * re-mapping needed. Caller must free() the result.
+ *
+ * Returns NULL if db_sqlite_init() was never called/failed, or on a
+ * genuine DB/allocation error. Zero matching rows still returns a
+ * valid {"events":[],"more":false}, not NULL. */
+char *db_sqlite_query_topology_json(double before_ts, int limit);
+
 /* Dashboard bootstrap-on-load, so a browser tab opened after a sniffer
  * restart isn't blank -- node_db (and the frontend's live-traffic-only
  * `nodes`/`markers` state) never persists to disk on their own, but the

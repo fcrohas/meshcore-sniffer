@@ -596,6 +596,58 @@ char *db_sqlite_query_telemetry_json(double before_ts, int limit)
     return buf;
 }
 
+char *db_sqlite_query_topology_json(double before_ts, int limit)
+{
+    if (!g_db) return NULL;
+    if (limit <= 0) limit = 1;
+
+    sqlite3_stmt *stmt = NULL;
+    static const char *SQL =
+        "SELECT json FROM events WHERE route_path_hex IS NOT NULL "
+        "AND (?1 <= 0 OR ts < ?1) ORDER BY ts DESC LIMIT ?2";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "db_sqlite: topology query failed: %s\n", sqlite3_errmsg(g_db));
+        return NULL;
+    }
+    sqlite3_bind_double(stmt, 1, before_ts);
+    /* Fetch one extra row so "more" can be derived without a second
+     * COUNT(*) query -- if the (limit+1)th row exists, there's more. */
+    sqlite3_bind_int(stmt, 2, limit + 1);
+
+    size_t cap = 256;
+    char *buf = malloc(cap);
+    if (!buf) { sqlite3_finalize(stmt); return NULL; }
+    int n = snprintf(buf, cap, "{\"events\":[");
+
+    int row_count = 0;
+    bool first = true, more = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (row_count >= limit) { more = true; break; }
+        const unsigned char *txt = sqlite3_column_text(stmt, 0);
+        int len = sqlite3_column_bytes(stmt, 0);
+        if (!txt || len <= 0) continue;
+
+        size_t need = (size_t)n + 1 + (size_t)len + 24;
+        if (need > cap) {
+            size_t newcap = cap * 2;
+            while (newcap < need) newcap *= 2;
+            char *nb = realloc(buf, newcap);
+            if (!nb) { free(buf); sqlite3_finalize(stmt); return NULL; }
+            buf = nb;
+            cap = newcap;
+        }
+        if (!first) buf[n++] = ',';
+        first = false;
+        memcpy(buf + n, txt, (size_t)len);
+        n += len;
+        ++row_count;
+    }
+    sqlite3_finalize(stmt);
+
+    n += snprintf(buf + n, cap - (size_t)n, "],\"more\":%s}", more ? "true" : "false");
+    return buf;
+}
+
 /* Escape a raw string for embedding in a JSON string literal (quote,
  * backslash, and C0 control chars) -- node long/short names are free
  * text heard over the mesh, not trusted input. UTF-8 multi-byte
